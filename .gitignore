@@ -127,6 +127,7 @@ dmypy.json
 
 .idea/
 weights/
+figs/
 data/
 *.h5
 *.npy
