@@ -31,12 +31,6 @@ class Normalization(Enum):
 
 class SMBISequence(Sequence):
 
-    # GLOBAL_MEAN = 26.55141378695617
-    # GLOBAL_STD = 532.9417312114326
-
-    # GLOBAL_MEAN = 27.510234012158833
-    # GLOBAL_STD = 458.35309046642584
-
     GLOBAL_MEAN = 24.0057203800476806
     GLOBAL_STD = 521.5308728112200924
 
@@ -62,6 +56,7 @@ class SMBISequence(Sequence):
         self.augment = augment
 
         self.sample_map = [i for i in range(0, len(self)*self.batch_size)]
+        self.epochs = 0
         self.on_epoch_end()
 
     def __len__(self):
@@ -71,10 +66,12 @@ class SMBISequence(Sequence):
         if self.stage == "train":
             random.shuffle(self.sample_map)
 
+        self.epochs += 1
+
     def __getitem__(self, idx):
 
         batch_input = np.zeros((self.batch_size, self.X.shape[1], self.X.shape[2]))
-        batch_discount = np.ones((self.batch_size, 1), dtype=np.float32)
+        batch_discount = np.ones((self.batch_size, ), dtype=np.float32)
         batch_output_cls = np.zeros((self.batch_size, 1))
 
         for i in range(0, self.batch_size):

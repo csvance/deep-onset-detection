@@ -20,8 +20,7 @@ class ValidationMetrics(Callback):
         idx = 0
         for bidx in range(0, len(seq)):
 
-            bin, bout = seq.__getitem__(bidx)
-            bin, _ = bin
+            bin, bout, _ = seq.__getitem__(bidx)
 
             self.X[idx:idx+batch_size] = bin
             self.y[idx:idx+batch_size] = bout

@@ -39,16 +39,19 @@ def main(session: str,
          v_normalization: str = 'global',
          weights=None,
          workers: int = 1,
-         l2: float = None,
+         l2: float = 0.01,
          l1: float = None,
          kernel_initializer: str = 'glorot_uniform',
          random_seed: int = None,
          cmd='train'):
     assert os.access('.', os.W_OK | os.R_OK)
 
+    if cmd != 'salience':
+        tf.compat.v1.disable_eager_execution()
+
     if random_seed is not None:
         np.random.seed(random_seed)
-        tf.set_random_seed(random_seed)
+        tf.random.set_seed(random_seed)
         random.seed(random_seed)
 
     gpus = tf.config.experimental.list_physical_devices('GPU')

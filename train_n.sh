@@ -1,12 +1,12 @@
 #!/bin/bash
 
-PREFIX=trueseed_finalfix_5point_bnall
-POOLING=stride
+PREFIX="tf2_test"
+POOLING="stride"
 DIMS=32
 BATCH=16
-NORMALIZATION=batch
-V_NORMALIZATION=global
-INITIALIZER=glorot_uniform
+NORMALIZATION="batch"
+V_NORMALIZATION="global"
+INITIALIZER="glorot_uniform"
 L2=0.01
 
 
