@@ -5,9 +5,7 @@ import random
 import tensorflow as tf
 from tensorflow.keras.callbacks import ModelCheckpoint, TensorBoard, LearningRateScheduler
 from tensorflow.keras.optimizers import SGD
-from tensorflow.keras.regularizers import l1 as l1r
 from tensorflow.keras.regularizers import l2 as l2r
-from tensorflow.keras.regularizers import l1_l2 as l1_l2r
 import numpy as np
 from model import residual_model
 from callback import ValidationMetrics
@@ -25,7 +23,6 @@ from generator import SMBISequence
     weights=('Weights path', 'option', 'w', str),
     workers=('Number of multiprocessing workers', 'option', 'W', int),
     l2=('L2 penalty', 'option', 'L', float),
-    l1=('L1 penalty', 'option', 'l', float),
     kernel_initializer=('Convolution weights initialization', 'option', 'I', str),
     random_seed=('RNG seed for NumPy + Tensorflow', 'option', 'S', int),
     cmd=('train, eval, salience', 'option', 'C', str)
@@ -40,7 +37,6 @@ def main(session: str,
          weights=None,
          workers: int = 1,
          l2: float = 0.01,
-         l1: float = None,
          kernel_initializer: str = 'glorot_uniform',
          random_seed: int = None,
          cmd='train'):
@@ -66,11 +62,7 @@ def main(session: str,
             # Memory growth must be set before GPUs have been initialized
             print(e)
 
-    if l1 is not None and l2 is not None:
-        kernel_regularizer = l1_l2r(l1, l2)
-    elif l1 is not None:
-        kernel_regularizer = l1r(l1)
-    elif l2 is not None:
+    if l2 is not None:
         kernel_regularizer = l2r(l2)
     else:
         kernel_regularizer = None
@@ -96,18 +88,7 @@ def main(session: str,
     checkpoint = ModelCheckpoint(filepath, monitor='val_auc', verbose=1, save_best_only=True, mode='max')
 
     def sched(epoch):
-        if epoch < 15:
-            return 0.0001
-        if epoch < 30:
-            return 0.0001 / 2
-        if epoch < 45:
-            return 0.0001 / 4
-        if epoch < 60:
-            return 0.0001 / 8
-        if epoch < 75:
-            return 0.0001 / 16
-
-        return 0.0001 / 32
+        return 0.0001 * 0.5**(np.floor(epoch / 15))
 
     reduce_lr = LearningRateScheduler(schedule=sched)
 
