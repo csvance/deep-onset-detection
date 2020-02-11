@@ -72,10 +72,10 @@ def main(session: str,
     else:
         kernel_regularizer = None
 
-    model, loss_fns, metrics, salience = residual_model(dims=dims,
-                                                        pooling=pooling,
-                                                        kernel_regularizer=kernel_regularizer,
-                                                        kernel_initializer=kernel_initializer)
+    model, loss_fns, metrics = residual_model(dims=dims,
+                                              pooling=pooling,
+                                              kernel_regularizer=kernel_regularizer,
+                                              kernel_initializer=kernel_initializer)
 
     if weights is not None:
         model.load_weights(weights, by_name=True)
@@ -179,11 +179,6 @@ def main(session: str,
         import matplotlib.pyplot as plt
         import matplotlib.cm as cm
 
-        sess = tf.InteractiveSession()
-        sess.run(tf.initialize_all_variables())
-        if weights is not None:
-            model.load_weights(weights)
-
         gidx = 0
 
         onset = False
@@ -196,10 +191,16 @@ def main(session: str,
                 input_seq = mi[0][sidx]
                 output_cls = mo[sidx][0]
 
-                evaluated_gradients, evaluated_cls = sess.run([salience, model.output],
-                                                              feed_dict={model.input[0]: [input_seq]})
-                evaluated_gradients = evaluated_gradients[0]
-                evaluated_cls = evaluated_cls[0]
+                wrt = np.array([input_seq.astype(np.float32)])
+                wrt_t = tf.constant(wrt)
+
+                with tf.GradientTape() as g:
+
+                    g.watch([wrt_t])
+                    evaluated_cls = model([wrt_t])
+
+                evaluated_gradients = np.abs(g.gradient(evaluated_cls, [wrt_t])[0][0].numpy())
+                evaluated_gradients_all = np.sum(evaluated_gradients, axis=-1)
 
                 if bool(output_cls):
                     if not onset:
@@ -209,15 +210,13 @@ def main(session: str,
                     if onset:
                         onset = False
 
-                plt.figure(figsize=(10, 5), facecolor='#808080')
+                fig = plt.figure(figsize=(10, 5), facecolor='#808080')
                 plt.title('GTC seizure onset of slow activity prediction w/ saliency')
                 plt.figtext(0.01, 0.01, 'Model: Residual CNN\nCarroll Vance <cs.vance@icloud.com>')
 
-                ax = plt.gca()
+                ax = fig.gca()
 
                 t = np.array([i for i in range(0, 2000)])
-
-                evaluated_gradients_all = np.sum(evaluated_gradients, axis=-1)
 
                 xlim = (0, 2000)
                 ylim = (0, np.max(evaluated_gradients_all))
@@ -234,7 +233,8 @@ def main(session: str,
                 locs = [i * 200 for i in range(0, 11)]
                 labels = ["%d" % (int(loc / 200)) for loc in locs]
 
-                plt.legend(['fp1-f7', 'f7-t7', 't7-p7', 'p7-o1', 'fp2-f8', 'f8-t8', 't8-p8', 'p8-o2', 'fz-cz', 'cz-pz'], fontsize='small', loc='upper left')
+                plt.legend(['fp1-f7', 'f7-t7', 't7-p7', 'p7-o1', 'fp2-f8', 'f8-t8', 't8-p8', 'p8-o2', 'fz-cz', 'cz-pz'],
+                           fontsize='small', loc='upper left')
                 plt.xticks(locs, labels)
                 plt.ylabel("Magnitude")
                 plt.xlabel("Seconds")
@@ -263,11 +263,12 @@ def main(session: str,
 
                 cb_pred.ax.set_ylabel('Prediction: %s' % outcome, color=textcolor)
                 if onset:
-                    plt.annotate("Onset", (onset_idx, 0), color='red', xytext=(onset_idx, np.max(input_seq)), arrowprops=dict(color='red', width=1., headwidth=6.))
+                    plt.annotate("Onset", (onset_idx, 0), color='red', xytext=(onset_idx, np.max(input_seq)),
+                                 arrowprops=dict(color='red', width=1., headwidth=6.))
                     onset_idx -= 20
 
-                # plt.show()
-                plt.savefig('figs/%d.png' % gidx, facecolor='#808080')
+                plt.show()
+                # plt.savefig('figs/%d.png' % gidx, facecolor='#808080')
 
                 plt.close('all')
 

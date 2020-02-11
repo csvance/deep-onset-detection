@@ -1,7 +1,7 @@
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import *
 import tensorflow.keras.backend as K
-from blurpool import AverageBlurPooling1D, MaxBlurPooling1D, BlurPool1D
+from blurpool import BlurPool1D
 
 
 class ResConvBlock(object):
@@ -41,12 +41,6 @@ class ResConvBlock(object):
 
         if pooling == 'stride':
             self.pool = BlurPool1D(name='%s_pool' % name)
-            self.skip_pool = None
-        elif pooling == 'max':
-            self.pool = MaxBlurPooling1D(name='%s_pool' % name)
-            self.skip_pool = None
-        elif pooling == 'avg':
-            self.pool = AverageBlurPooling1D(name='%s_pool' % name)
             self.skip_pool = None
         elif pooling == 'stride_noaa':
             self.pool = None
@@ -101,20 +95,12 @@ def residual_model(dims: int = 32,
                    kernel_initializer: str = 'glorot_uniform'):
 
     layer_input = Input((seqlen, n_feat))
-    layer_discount = Input((1,))
-
-    def create_d_binary_crossentropy(d):
-        def d_binary_crossentropy(y_true, y_pred):
-            x = d * K.binary_crossentropy(y_true, y_pred)
-            return K.mean(x, axis=-1)
-
-        return d_binary_crossentropy
 
     def bce(y_true, y_pred):
         return K.mean(K.binary_crossentropy(y_true, y_pred))
 
     metrics = {'cls': ['acc', bce]}
-    loss_fns = [create_d_binary_crossentropy(layer_discount)]
+    loss_fns = ['binary_crossentropy']
 
     def unique(start):
         i = start
@@ -133,11 +119,7 @@ def residual_model(dims: int = 32,
     bn1 = BatchNormalization(name='0_bn')
     act1 = ReLU(name='0_relu')
 
-    if pooling == 'avg':
-        pool = AverageBlurPooling1D(name='0_pool')
-    elif pooling == 'max':
-        pool = MaxBlurPooling1D(name='0_pool')
-    elif pooling == 'stride':
+    if pooling == 'stride':
         pool = BlurPool1D(name='0_pool')
     else:
         pool = None
@@ -205,8 +187,6 @@ def residual_model(dims: int = 32,
 
     x = cls(x)
 
-    salience = K.abs(K.gradients(x, layer_input)[0])
-
-    model = Model(inputs=[layer_input, layer_discount], outputs=x)
+    model = Model(inputs=layer_input, outputs=x)
     model.summary()
-    return model, loss_fns, metrics, salience
+    return model, loss_fns, metrics

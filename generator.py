@@ -114,4 +114,4 @@ class SMBISequence(Sequence):
         else:
             raise ValueError
 
-        return [batch_input, batch_discount], batch_output_cls
+        return batch_input, batch_output_cls, batch_discount

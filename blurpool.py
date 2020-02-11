@@ -7,7 +7,7 @@ from tensorflow import keras
 
 class BlurPool1D(Layer):
 
-    def __init__(self, pool_size: int = 2, kernel_size: int = 5, **kwargs):
+    def __init__(self, pool_size: int = 2, kernel_size: int = 3, **kwargs):
         self.pool_size = pool_size
         self.blur_kernel = None
         self.kernel_size = kernel_size
