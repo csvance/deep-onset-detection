@@ -265,14 +265,14 @@ def main(session: str,
 
                 cb_pred.ax.set_ylabel('Prediction: %s' % outcome, color=textcolor)
                 if onset:
-                    plt.annotate("Onset", (onset_idx, 0), color='red', xytext=(onset_idx, np.max(input_seq)),
+                    plt.annotate("Onset", (onset_idx, 0), color='red', xytext=(onset_idx, np.max(input_seq_v)),
                                  arrowprops=dict(color='red', width=1., headwidth=6.))
                     onset_idx -= 20
 
                 if paper_mode:
-                    plt.savefig('figs/%d.png' % gidx)  # , facecolor='#808080')
+                    plt.savefig('figs/%d.png' % gidx)
                 else:
-                    plt.show()
+                    plt.savefig('figs/%d.png' % gidx, facecolor='#808080')
 
                 plt.close('all')
 
