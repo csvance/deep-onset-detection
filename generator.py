@@ -38,6 +38,7 @@ class SMBISequence(Sequence):
                  X,
                  y,
                  d=None,
+                 p=None,
                  stage: str = "train",
                  batch_size: int = 128,
                  normalization=Normalization.BATCH,
@@ -50,6 +51,7 @@ class SMBISequence(Sequence):
         self.X = X
         self.y = y
         self.d = d
+        self.p = p
 
         self.normalization = Normalization.from_str(normalization)
 
@@ -72,6 +74,8 @@ class SMBISequence(Sequence):
 
         batch_input = np.zeros((self.batch_size, self.X.shape[1], self.X.shape[2]))
         batch_discount = np.ones((self.batch_size, ), dtype=np.float32)
+        batch_patient = np.zeros((self.batch_size,), dtype=np.int)
+
         batch_output_cls = np.zeros((self.batch_size, 1))
 
         for i in range(0, self.batch_size):
@@ -80,6 +84,8 @@ class SMBISequence(Sequence):
             batch_input[i] = self.X[sample_idx, :, :]
             if self.d is not None:
                 batch_discount[i] = self.d[sample_idx]
+            if self.p is not None:
+                batch_patient[i] = self.p[sample_idx]
             batch_output_cls[i] = 1 if len(np.where(self.y[sample_idx] == 1)[0]) > 0 else 0
 
         if self.normalization == Normalization.BATCH:
@@ -111,4 +117,7 @@ class SMBISequence(Sequence):
         else:
             raise ValueError
 
-        return batch_input, batch_output_cls, batch_discount
+        if self.p is None:
+            return batch_input, batch_output_cls, batch_discount
+        else:
+            return [batch_input, batch_patient], batch_output_cls, batch_discount

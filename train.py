@@ -25,7 +25,8 @@ from generator import SMBISequence
     l2=('L2 penalty', 'option', 'L', float),
     kernel_initializer=('Convolution weights initialization', 'option', 'I', str),
     random_seed=('RNG seed for NumPy + Tensorflow', 'option', 'S', int),
-    cmd=('train, eval, salience', 'option', 'C', str)
+    cmd=('train, eval, salience', 'option', 'C', str),
+    paper_mode=('Salience visualization for paper', 'option', 'P', int)
 )
 def main(session: str,
          dims: int = 32,
@@ -39,7 +40,8 @@ def main(session: str,
          l2: float = 0.01,
          kernel_initializer: str = 'glorot_uniform',
          random_seed: int = None,
-         cmd='train'):
+         cmd='train',
+         paper_mode: int = 0):
     assert os.access('.', os.W_OK | os.R_OK)
 
     if cmd != 'salience':
@@ -88,7 +90,7 @@ def main(session: str,
     checkpoint = ModelCheckpoint(filepath, monitor='val_auc', verbose=1, save_best_only=True, mode='max')
 
     def sched(epoch):
-        return 0.0001 * 0.5**(np.floor(epoch / 15))
+        return 0.0001 * 0.5 ** (np.floor(epoch / 15))
 
     reduce_lr = LearningRateScheduler(schedule=sched)
 
@@ -129,6 +131,7 @@ def main(session: str,
 
     X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
     y_test = np.load('data/test_labels.p', mmap_mode='r')
+    p_test = np.load('data/test_pids.p', mmap_mode='r')
 
     val_seq = SMBISequence(X=X_test,
                            y=y_test,
@@ -163,17 +166,29 @@ def main(session: str,
         import matplotlib.pyplot as plt
         import matplotlib.cm as cm
 
+        val_seq_nonorm = SMBISequence(X=X_test,
+                                      y=y_test,
+                                      p=p_test,
+                                      stage='test',
+                                      batch_size=batch_size,
+                                      normalization='none')
+
         gidx = 0
 
         onset = False
         onset_idx = 0
 
         for bidx in range(0, len(val_seq)):
-            mi, mo = val_seq.__getitem__(bidx)
+            model_seq, model_cls, _ = val_seq.__getitem__(bidx)
+            vis_input, _, _ = val_seq_nonorm.__getitem__(bidx)
+
+            vis_seq = vis_input[0]
+            vis_p = vis_input[1]
 
             for sidx in range(0, batch_size):
-                input_seq = mi[0][sidx]
-                output_cls = mo[sidx][0]
+                input_seq = model_seq[sidx]
+                input_seq_v = vis_seq[sidx]
+                output_cls = model_cls[sidx][0]
 
                 wrt = np.array([input_seq.astype(np.float32)])
                 wrt_t = tf.constant(wrt)
@@ -194,10 +209,13 @@ def main(session: str,
                     if onset:
                         onset = False
 
-                fig = plt.figure(figsize=(10, 5), facecolor='#808080')
-                plt.title('GTC seizure onset of slow activity prediction w/ saliency')
-                plt.figtext(0.01, 0.01, 'Model: Residual CNN\nCarroll Vance <cs.vance@icloud.com>')
-
+                if paper_mode:
+                    fig = plt.figure(figsize=(10, 5))
+                    plt.title('Patient %d' % vis_p[sidx])
+                else:
+                    fig = plt.figure(figsize=(10, 5), facecolor='#808080')
+                    plt.figtext(0.01, 0.01, 'Model: Residual CNN\nCarroll Vance <cs.vance@icloud.com>')
+                    plt.title('GTC seizure onset of slow activity prediction w/ saliency: Patient %d' % vis_p[sidx])
                 ax = fig.gca()
 
                 t = np.array([i for i in range(0, 2000)])
@@ -209,7 +227,7 @@ def main(session: str,
                 vmax = ylim[1]
 
                 for i in range(0, 10):
-                    plt.plot(t, input_seq[:, i])
+                    plt.plot(t, input_seq_v[:, i])
                 ax.pcolorfast(xlim, ax.get_ylim(), evaluated_gradients_all[np.newaxis], vmin=vmin, vmax=vmax,
                               cmap='viridis')
                 plt.grid()
@@ -220,7 +238,7 @@ def main(session: str,
                 plt.legend(['fp1-f7', 'f7-t7', 't7-p7', 'p7-o1', 'fp2-f8', 'f8-t8', 't8-p8', 'p8-o2', 'fz-cz', 'cz-pz'],
                            fontsize='small', loc='upper left')
                 plt.xticks(locs, labels)
-                plt.ylabel("Magnitude")
+                plt.ylabel("Amplitude")
                 plt.xlabel("Seconds")
 
                 cb_pred = plt.colorbar(cm.ScalarMappable(cmap='viridis'), ticks=[0.0, 0.25, 0.5, 0.75, 1.0])
@@ -251,8 +269,10 @@ def main(session: str,
                                  arrowprops=dict(color='red', width=1., headwidth=6.))
                     onset_idx -= 20
 
-                plt.show()
-                # plt.savefig('figs/%d.png' % gidx, facecolor='#808080')
+                if paper_mode:
+                    plt.savefig('figs/%d.png' % gidx)  # , facecolor='#808080')
+                else:
+                    plt.show()
 
                 plt.close('all')
 
