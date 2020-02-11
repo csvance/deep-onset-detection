@@ -1,4 +1,4 @@
-# Leveraging deep learning to detect predictive markers of sudden death in epilepsy
+# Learning to detect the onset of slow activity after a generalized tonic-clonic seizure
 
 ## Methods
 In recent years, deep learning has become state of the art for many domains with large amounts of available data. Unfortunately, data is not abundant for biomedical applications where deep learning could be beneficial. Taking these limitations into account, we present a framework to apply deep learning to the detection of the onset of slow activity after a generalized tonic clonic seizure, as well as  other EEG signal detection problems exhibiting extreme data paucity. We also develop a system for real-time visualization of our models predictions  to emphasize which parts of the signal contributed most to the decision.
