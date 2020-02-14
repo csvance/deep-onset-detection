@@ -4,16 +4,24 @@ import os
 import numpy as np
 import pandas as pd
 
-TAGS = ['epoch_val_loss', 'epoch_val_acc', 'epoch_val_bce', 'epoch_val_sensitivity', 'epoch_val_auc', 'epoch_val_specificity']
+TAGS_V1 = ['epoch_val_loss', 'epoch_val_acc', 'epoch_val_bce', 'epoch_val_sensitivity', 'epoch_val_auc', 'epoch_val_specificity']
+TAGS_V2 = ['epoch_loss', 'epoch_acc', 'epoch_bce', 'epoch_sensitivity', 'epoch_auc', 'epoch_specificity']
 
 
 @plac.annotations(
-    session=('Session name', 'positional', None, str)
+    session=('Session name', 'positional', None, str),
+    tf_version=('Major version number of tensorflow', 'option', 't', int)
 )
-def main(session: str):
+def main(session: str, tf_version: int = 2):
+
+    if tf_version == 1:
+        TAGS = TAGS_V1
+    elif tf_version == 2:
+        TAGS = TAGS_V2
+    else:
+        raise ValueError
 
     runs_best = {}
-    runs_all = {}
     for tag in TAGS:
         runs_best[tag] = []
 
@@ -24,6 +32,8 @@ def main(session: str):
 
         for root, dirs, files in os.walk(log_dir, topdown=False):
             for name in files:
+                if root.find('train') != -1:
+                    continue
                 log_path = os.path.join(root, name)
                 print('Reading Log: %s' % log_path)
 
@@ -37,9 +47,8 @@ def main(session: str):
                         event_accumulator.HISTOGRAMS: 1})
 
                 ea.Reload()
-
                 auc = []
-                for x in ea.Scalars('epoch_val_auc'):
+                for x in ea.Scalars(TAGS[-2]):
                     auc.append(x.value)
 
                 best_idx = np.argmax(auc)
@@ -55,7 +64,7 @@ def main(session: str):
     print(df.std())
     print("--argmax--")
     print(df.idxmax())
-    print(df.iloc[np.argmax(df['epoch_val_auc'])])
+    print(df.iloc[np.argmax(df[TAGS[-2]])])
 
 
 if __name__ == '__main__':

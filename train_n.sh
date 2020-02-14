@@ -1,6 +1,6 @@
 #!/bin/bash
 
-PREFIX="tf2_test"
+PREFIX="fullmodel"
 POOLING="stride"
 DIMS=32
 BATCH=16

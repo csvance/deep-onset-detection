@@ -90,7 +90,7 @@ def main(session: str,
     checkpoint = ModelCheckpoint(filepath, monitor='val_auc', verbose=1, save_best_only=True, mode='max')
 
     def sched(epoch):
-        return 0.0001 * 0.5 ** (np.floor(epoch / 15))
+        return 1e-4 * 0.5 ** (np.floor(epoch / 15))
 
     reduce_lr = LearningRateScheduler(schedule=sched)
 
