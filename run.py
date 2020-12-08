@@ -49,9 +49,9 @@ class OnsetDataset(Dataset):
                 y_pos_pct = y_pos / (y_pos + y_neg)
 
                 if y_pos_pct < 0.5:
-                    w = min(1., 4 * y_pos / (y_pos + y_neg))
+                    w = min(2., 4 * y_pos / (y_pos + y_neg))
                 else:
-                    w = min(1., 4 * y_neg / (y_pos + y_neg))
+                    w = min(2., 4 * y_neg / (y_pos + y_neg))
         else:
             w = 1.
             y = self.y[item]
@@ -113,8 +113,6 @@ class OnsetModule(LightningModule):
         self._test_logits = []
         self._test_true = []
 
-        self.accuracy = pl.metrics.Accuracy()
-
         self.blocks = nn.ModuleList()
 
         c_in = CFG[0]['dim']
@@ -166,16 +164,11 @@ class OnsetModule(LightningModule):
         y = self.forward(X)
         loss = torch.mean(alpha*F.cross_entropy(y, y_target, reduction="none"))
 
-        acc_step = self.accuracy(y, y_target)
-        self.log('train_acc', acc_step, prog_bar=True, logger=True)
         self.log('train_loss', loss, prog_bar=False, logger=True)
         self.log('lr', self.optimizers().param_groups[0]['lr'])
         self.log('momentum', self.optimizers().param_groups[0]['momentum'])
 
         return {'loss': loss}
-
-    def training_epoch_end(self, outs):
-        self.accuracy.reset()
 
     def validation_step(self, batch, batch_nb):
         X, y_target, w = batch
@@ -186,14 +179,11 @@ class OnsetModule(LightningModule):
         self._test_logits.append(y[:, 1].detach().cpu().numpy())
         self._test_true.append(y_target.detach().cpu().numpy())
 
-        self.log('val_acc', self.accuracy(y, y_target), prog_bar=True, logger=False)
-
         return {'val_loss': loss}
 
     def validation_epoch_end(self, outputs):
         avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
 
-        self.log('val_acc', self.accuracy.compute(), prog_bar=False, logger=True)
         self.log('val_loss', avg_loss, prog_bar=False, logger=True)
 
         self._test_logits = np.concatenate(self._test_logits, axis=0)
@@ -203,8 +193,6 @@ class OnsetModule(LightningModule):
 
         self._test_true = []
         self._test_logits = []
-
-        self.accuracy.reset()
 
         return {'val_loss': avg_loss}
 
@@ -217,14 +205,11 @@ class OnsetModule(LightningModule):
         self._test_logits.append(y[:, 1].detach().cpu().numpy())
         self._test_true.append(y_target.detach().cpu().numpy())
 
-        self.log('test_acc', self.accuracy(y, y_target), prog_bar=True, logger=False)
-
         return {'test_loss': loss}
 
     def test_epoch_end(self, outputs):
         avg_loss = torch.stack([x['test_loss'] for x in outputs]).mean()
 
-        self.log('test_acc', self.accuracy.compute(), prog_bar=False, logger=True)
         self.log('test_loss', avg_loss, prog_bar=False, logger=True)
 
         self._test_logits = np.concatenate(self._test_logits, axis=0)
@@ -235,7 +220,6 @@ class OnsetModule(LightningModule):
         self._test_true = []
         self._test_logits = []
 
-        self.accuracy.reset()
         self._test_true = []
         self._test_logits = []
 
