@@ -1,14 +1,12 @@
-from torch.utils.data import Dataset, DataLoader
-from torch_optimizer import Lookahead
-from sklearn.metrics import roc_auc_score, confusion_matrix
-from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+import plac
 import pytorch_lightning as pl
-from pytorch_lightning import LightningModule, Trainer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import plac
-import numpy as np
+from sklearn.metrics import roc_auc_score, confusion_matrix
+from sklearn.utils.class_weight import compute_class_weight
+from torch.utils.data import Dataset, DataLoader
 
 D = 32
 BN_EPS = 1e-5
@@ -20,8 +18,8 @@ EPOCHS = 75
 LR_MAX = 0.001
 
 CFG = [
-    {'repeat': 2, 'dim': int(1 * D), 'expand': 2, 'stride': 2, 'final': False},
-    {'repeat': 3, 'dim': int(2 * D), 'expand': 2, 'stride': 2, 'final': False},
+    {'repeat': 2, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'final': False},
+    {'repeat': 3, 'dim': int(2 * D), 'expand': 1, 'stride': 2, 'final': False},
     {'repeat': 1, 'dim': int(4 * D), 'expand': 1, 'stride': 2, 'final': True},
 ]
 
@@ -62,10 +60,14 @@ class OnsetDataset(Dataset):
 
                 pct = min(y_pos_pct, y_neg_pct)
 
-                if pct < 0.1 or pct > 0.9:
-                    w = 0.1*self.w[1]
+                if pct < 0.1:
+                    w = 10*pct*self.w[1]
+                elif pct > 0.9:
+                    w = 10*(1-pct)*self.w[1]
                 else:
-                    w = 1.2*self.w[1]
+                    w = self.w[1]
+
+                w *= 1.1
         else:
             y = self.y[item]
             w = self.w[[0, 1].index(y)]
@@ -126,10 +128,10 @@ class ResnetBlock(nn.Module):
             self.blurpool = BlurPool1d(int(c_in))
         else:
             self.blurpool = None
-        self.conv1 = nn.Conv1d(c_in, int(c_in * expand), kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm1d(int(c_in * expand), eps=BN_EPS, momentum=1 - BN_MOM)
+        self.conv1 = nn.Conv1d(c_in, int(c_in), kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm1d(int(c_in), eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu2 = nn.ReLU()
-        self.conv2 = nn.Conv1d(int(c_in * expand), int(c_in * expand), kernel_size=1, padding=0, bias=False)
+        self.conv2 = nn.Conv1d(int(c_in), int(c_in * expand), kernel_size=1, padding=0, bias=False)
         self.bn3 = nn.BatchNorm1d(int(c_in * expand), eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu3 = nn.ReLU()
         self.conv3 = nn.Conv1d(int(c_in * expand), c_out, kernel_size=3, padding=1, bias=False)
@@ -158,7 +160,7 @@ class ResnetBlock(nn.Module):
         return x + x_skip
 
 
-class OnsetModule(LightningModule):
+class OnsetModule(pl.LightningModule):
     def __init__(self, Xy_train, Xy_test):
         super().__init__()
 
@@ -192,7 +194,7 @@ class OnsetModule(LightningModule):
         self.bn_head = nn.BatchNorm1d(features, eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu_head = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
-        self.fc = nn.Linear(int(2*features), 2, bias=False)
+        self.fc = nn.Linear(int(2 * features), 2, bias=False)
 
     def init(self):
         def _init(m):
@@ -229,7 +231,7 @@ class OnsetModule(LightningModule):
         x = self.bn_head(x)
         x = self.relu_head(x)
         x = F.max_pool1d(x, kernel_size=125, stride=125, padding=0)
-        x = x.view((x.size(0), x.size(1)*x.size(2)))
+        x = x.view((x.size(0), x.size(1) * x.size(2)))
         y = self.fc(x)
 
         return y
@@ -323,10 +325,9 @@ class OnsetModule(LightningModule):
         self._test_pred = []
 
     def configure_optimizers(self):
-        inner_optimizer = torch.optim.SGD(self.parameters(),
-                                          lr=0.001,
-                                          momentum=0.9)
-        optimizer = Lookahead(inner_optimizer)
+        optimizer = torch.optim.SGD(self.parameters(),
+                                    lr=0.0001,
+                                    momentum=0.9)
         schedule = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=15, gamma=0.5)
         return [optimizer], [schedule]
 
@@ -358,11 +359,11 @@ def main():
     model = OnsetModule((X_train, y_train), (X_test, y_test))
     model.init()
 
-    trainer = Trainer(gpus=1,
-                      precision=32,
-                      max_epochs=EPOCHS,
-                      log_every_n_steps=5,
-                      flush_logs_every_n_steps=10)
+    trainer = pl.Trainer(gpus=1,
+                         precision=32,
+                         max_epochs=EPOCHS,
+                         log_every_n_steps=5,
+                         flush_logs_every_n_steps=10)
     trainer.fit(model)
     trainer.test()
 
