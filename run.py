@@ -16,7 +16,8 @@ D = 32
 BN_EPS = 1e-5
 BN_MOM = 0.99
 BATCH_SIZE = 16
-WEIGHT_DECAY = 1e-2
+WEIGHT_DECAY = 0.
+L2 = 0.0005
 EPOCHS = 70
 LR_MAX = 0.001
 
@@ -155,6 +156,29 @@ class OnsetModule(LightningModule):
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
         self.fc = nn.Linear(features, 2)
 
+    def init(self):
+        def _init(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.kaiming_uniform_(m.weight)
+                torch.nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Conv1d):
+                torch.nn.init.kaiming_uniform_(m.weight)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm1d):
+                torch.nn.init.ones_(m.weight)
+                torch.nn.init.zeros_(m.bias)
+        self.apply(_init)
+
+    def l2(self, lam=L2):
+        l2 = torch.sum(lam*torch.pow(self.conv_stem.weight, 2))
+        for block in self.blocks:
+            l2 += torch.sum(lam*torch.pow(block.conv1.weight, 2))
+            l2 += torch.sum(lam*torch.pow(block.conv2.weight, 2))
+            l2 += torch.sum(lam*torch.pow(block.conv3.weight, 2))
+
+        return l2
+
     def forward(self, x):
 
         # Batch-wise z-score
@@ -183,6 +207,8 @@ class OnsetModule(LightningModule):
 
         y = self.forward(X)
         loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
+        if L2 > 0.:
+            loss += self.l2()
 
         self.log('train_loss', loss, prog_bar=False, logger=True)
         self.log('lr', self.optimizers().param_groups[0]['lr'])
@@ -299,8 +325,8 @@ def main():
     y_test = np.load('data/test_labels.p', mmap_mode='r')
 
     model = OnsetModule((X_train, y_train), (X_test, y_test))
+    model.init()
 
-    logger = TensorBoardLogger('lightning_logs')
     trainer = Trainer(gpus=1,
                       precision=32,
                       max_epochs=EPOCHS,
