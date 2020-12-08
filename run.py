@@ -1,5 +1,4 @@
 from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import OneCycleLR
 from torch_optimizer import Lookahead
 from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
@@ -11,18 +10,18 @@ import torch.nn.functional as F
 import plac
 import numpy as np
 
-D = 16
+D = 32
 BN_EPS = 1e-5
 BN_MOM = 0.99
 BATCH_SIZE = 16
 WEIGHT_DECAY = 0.
 L2 = 0.01
-EPOCHS = 70
+EPOCHS = 75
 LR_MAX = 0.001
 
 CFG = [
-    {'repeat': 2, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'final': False},
-    {'repeat': 3, 'dim': int(2 * D), 'expand': 1, 'stride': 2, 'final': False},
+    {'repeat': 2, 'dim': int(1 * D), 'expand': 2, 'stride': 2, 'final': False},
+    {'repeat': 3, 'dim': int(2 * D), 'expand': 2, 'stride': 2, 'final': False},
     {'repeat': 1, 'dim': int(4 * D), 'expand': 1, 'stride': 2, 'final': True},
 ]
 
@@ -61,10 +60,12 @@ class OnsetDataset(Dataset):
                 y_pos_pct = y_pos / (y_pos + y_neg)
                 y_neg_pct = y_neg / (y_pos + y_neg)
 
-                if y_pos_pct < 0.5:
-                    w = self.w[1] * 2 * min(1., 2 * y_pos_pct)
+                pct = min(y_pos_pct, y_neg_pct)
+
+                if pct < 0.1 or pct > 0.9:
+                    w = 0.1*self.w[1]
                 else:
-                    w = self.w[1] * 2 * min(1., 2 * y_neg_pct)
+                    w = 1.2*self.w[1]
         else:
             y = self.y[item]
             w = self.w[[0, 1].index(y)]
@@ -121,14 +122,13 @@ class ResnetBlock(nn.Module):
 
         self.bn1 = nn.BatchNorm1d(c_in, eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu1 = nn.ReLU()
+        if stride == 2:
+            self.blurpool = BlurPool1d(int(c_in))
+        else:
+            self.blurpool = None
         self.conv1 = nn.Conv1d(c_in, int(c_in * expand), kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm1d(int(c_in * expand), eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu2 = nn.ReLU()
-        if stride == 2:
-            self.blurpool = BlurPool1d(int(c_in * expand))
-        else:
-            self.blurpool = None
-
         self.conv2 = nn.Conv1d(int(c_in * expand), int(c_in * expand), kernel_size=1, padding=0, bias=False)
         self.bn3 = nn.BatchNorm1d(int(c_in * expand), eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu3 = nn.ReLU()
@@ -192,14 +192,14 @@ class OnsetModule(LightningModule):
         self.bn_head = nn.BatchNorm1d(features, eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu_head = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
-        self.lstm = nn.LSTM(input_size=features, hidden_size=features)
-        self.fc = nn.Linear(features, 2)
+        self.fc = nn.Linear(int(2*features), 2, bias=False)
 
     def init(self):
         def _init(m):
             if isinstance(m, nn.Linear):
                 torch.nn.init.kaiming_uniform_(m.weight)
-                torch.nn.init.zeros_(m.bias)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv1d):
                 torch.nn.init.kaiming_uniform_(m.weight)
                 if m.bias is not None:
@@ -228,10 +228,9 @@ class OnsetModule(LightningModule):
 
         x = self.bn_head(x)
         x = self.relu_head(x)
-        x = F.max_pool1d(x, kernel_size=50, stride=50, padding=0)
-        x = x.permute(0, 2, 1)
-        x, _ = self.lstm(x)
-        y = self.fc(x[:, -1, :])
+        x = F.max_pool1d(x, kernel_size=125, stride=125, padding=0)
+        x = x.view((x.size(0), x.size(1)*x.size(2)))
+        y = self.fc(x)
 
         return y
 
@@ -247,8 +246,6 @@ class OnsetModule(LightningModule):
                 l2 += torch.sum(L2 * torch.pow(block.conv1.weight, 2))
                 l2 += torch.sum(L2 * torch.pow(block.conv2.weight, 2))
                 l2 += torch.sum(L2 * torch.pow(block.conv3.weight, 2))
-            l2 += torch.sum(L2 * torch.pow(self.lstm.weight_ih_l0, 2))
-            l2 += torch.sum(L2 * torch.pow(self.fc.weight, 2))
 
             loss += l2
 
@@ -327,18 +324,10 @@ class OnsetModule(LightningModule):
 
     def configure_optimizers(self):
         inner_optimizer = torch.optim.SGD(self.parameters(),
-                                          lr=0.0001,
-                                          weight_decay=WEIGHT_DECAY)
+                                          lr=0.001,
+                                          momentum=0.9)
         optimizer = Lookahead(inner_optimizer)
-        schedule = {'scheduler': OneCycleLR(inner_optimizer,
-                                            max_lr=LR_MAX,
-                                            epochs=EPOCHS,
-                                            steps_per_epoch=int(len(self.X_train) // BATCH_SIZE),
-                                            verbose=False),
-                    'name': 'learning_rate',
-                    'interval': 'step',
-                    'frequency': 1
-                    }
+        schedule = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=15, gamma=0.5)
         return [optimizer], [schedule]
 
     def train_dataloader(self):
