@@ -10,14 +10,17 @@ from torch.nn.utils import weight_norm
 from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from torch.utils.data import Dataset, DataLoader
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 D = 32
 BATCH_SIZE = 8
 LR = 0.005
-MOMENTUM = 0.9
+MOMENTUM = 0.95
 WEIGHT_DECAY = 0.025
 EPOCHS = 75
 NUM_WORKERS = 0
+GROUPS = 4
 
 CFG = [
     {'repeat': 1, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'final': False, 'project': True},
@@ -64,8 +67,6 @@ class OnsetDataset(Dataset):
 
                 if pct < 0.1:
                     w = 10 * pct * self.w[1]
-                elif pct > 0.9:
-                    w = 10 * (1 - pct) * self.w[1]
                 else:
                     w = self.w[1]
 
@@ -124,7 +125,7 @@ class ResnetBlock(nn.Module):
     def __init__(self, c_in: int, c_out: int, expand: int, stride: int = 1, project: bool = False):
         super().__init__()
 
-        self.norm1 = nn.GroupNorm(num_groups=4, num_channels=c_in)
+        self.norm1 = nn.GroupNorm(num_groups=GROUPS, num_channels=c_in)
         self.relu1 = nn.ReLU()
         if stride == 2:
             self.blurpool = BlurPool1d(int(c_in))
@@ -136,7 +137,7 @@ class ResnetBlock(nn.Module):
                                padding=1,
                                bias=False)
 
-        self.norm2 = nn.GroupNorm(num_groups=4, num_channels=int(expand * c_in))
+        self.norm2 = nn.GroupNorm(num_groups=GROUPS, num_channels=int(expand * c_in))
         self.relu2 = nn.ReLU()
         self.conv2 = nn.Conv1d(in_channels=int(expand * c_in),
                                out_channels=c_out,
@@ -214,10 +215,10 @@ class OnsetModule(pl.LightningModule):
 
             c_in = cfg['dim']
 
-        self.norm_head = nn.GroupNorm(num_channels=features, num_groups=4)
+        self.norm_head = nn.GroupNorm(num_groups=GROUPS, num_channels=features)
         self.relu_head = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
-        self.fc = nn.Linear(int(2 * features), 2, bias=False)
+        self.fc = nn.Linear(features, 2, bias=False)
 
     def init(self):
         def _init(m):
@@ -226,24 +227,22 @@ class OnsetModule(pl.LightningModule):
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv1d):
-                torch.nn.init.kaiming_normal_(m.weight)
+                torch.nn.init.kaiming_uniform_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm1d):
-                torch.nn.init.ones_(m.weight)
-                torch.nn.init.zeros_(m.bias)
 
         self.apply(_init)
 
     def forward(self, x: torch.tensor):
 
+        # Standardize input preserving relationship between channels
         mu = torch.mean(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         if self.training:
             # Add random noise to normalization statistics
-            mu = mu*(1. + (torch.rand(1, device=x.device) - 0.5)/2.5)
-            sd = sd*(1. + (torch.rand(1, device=x.device) - 0.5)/2.5)
-        x = (x - mu)/sd
+            mu = mu * (1. + (torch.rand(1, device=x.device) - 0.5) / 2.5)
+            sd = sd * (1. + (torch.rand(1, device=x.device) - 0.5) / 2.5)
+        x = (x - mu) / sd
 
         x = self.conv_stem(x)
         for block in self.blocks:
@@ -251,8 +250,7 @@ class OnsetModule(pl.LightningModule):
 
         x = self.norm_head(x)
         x = self.relu_head(x)
-        x = F.max_pool1d(x, kernel_size=125, stride=125, padding=0)
-        x = x.view((x.size(0), x.size(1) * x.size(2)))
+        x = self.pool_head(x)[:, :, 0]
         y = self.fc(x)
 
         return y
@@ -290,12 +288,14 @@ class OnsetModule(pl.LightningModule):
 
         try:
             self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
-            tn, fp, fn, tp = confusion_matrix(y_true=self._test_true.astype(np.int),
-                                              y_pred=np.round(self._test_pred).astype(np.int)).ravel()
-            print("\n\n----Confusion Matrix----")
-            print("\t[neg\t\tpos\t\t]")
-            print("neg\t[%d\t\t%d\t]" % (tn, fp))
-            print("pos\t[%d\t\t%d\t]\n" % (fn, tp))
+
+            cm = confusion_matrix(y_true=self._test_true.astype(np.int),
+                                  y_pred=np.round(self._test_pred).astype(np.int),
+                                  normalize='true')
+            ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
+            ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
+            plt.show()
+
         except ValueError:
             pass
 
@@ -323,13 +323,12 @@ class OnsetModule(pl.LightningModule):
 
         self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
 
-        tn, fp, fn, tp = confusion_matrix(y_true=self._test_true.astype(np.int),
-                                          y_pred=np.round(self._test_pred).astype(np.int)).ravel()
-
-        print("\n\n----Confusion Matrix----")
-        print("\t[neg\t\tpos\t\t]")
-        print("neg\t[%d\t\t%d\t]" % (tn, fp))
-        print("pos\t[%d\t\t%d\t]\n" % (fn, tp))
+        cm = confusion_matrix(y_true=self._test_true.astype(np.int),
+                              y_pred=np.round(self._test_pred).astype(np.int),
+                              normalize='true')
+        ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
+        ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
+        plt.show()
 
         self._test_true = []
         self._test_pred = []
@@ -379,7 +378,8 @@ def main():
                          precision=32,
                          max_epochs=EPOCHS,
                          log_every_n_steps=5,
-                         flush_logs_every_n_steps=10)
+                         flush_logs_every_n_steps=1)
+
     trainer.fit(model)
     trainer.test()
 
