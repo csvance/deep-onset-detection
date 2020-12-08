@@ -2,25 +2,27 @@ import numpy as np
 import plac
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
+from torch import nn
 import torch.nn.functional as F
+from torch_optimizer import SGDW
+from torch_optimizer import Lookahead
+from torch.nn.utils import weight_norm
 from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from torch.utils.data import Dataset, DataLoader
 
 D = 32
-BN_EPS = 1e-5
-BN_MOM = 0.99
-BATCH_SIZE = 16
-WEIGHT_DECAY = 0.
-L2 = 0.01
+BATCH_SIZE = 8
+LR = 0.005
+MOMENTUM = 0.9
+WEIGHT_DECAY = 0.025
 EPOCHS = 75
-LR_MAX = 0.001
+NUM_WORKERS = 0
 
 CFG = [
-    {'repeat': 2, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'final': False},
-    {'repeat': 3, 'dim': int(2 * D), 'expand': 1, 'stride': 2, 'final': False},
-    {'repeat': 1, 'dim': int(4 * D), 'expand': 1, 'stride': 2, 'final': True},
+    {'repeat': 1, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'final': False, 'project': True},
+    {'repeat': 3, 'dim': int(2 * D), 'expand': 1, 'stride': 2, 'final': False, 'project': True},
+    {'repeat': 1, 'dim': int(4 * D), 'expand': 1, 'stride': 2, 'final': True, 'project': True},
 ]
 
 
@@ -61,9 +63,9 @@ class OnsetDataset(Dataset):
                 pct = min(y_pos_pct, y_neg_pct)
 
                 if pct < 0.1:
-                    w = 10*pct*self.w[1]
+                    w = 10 * pct * self.w[1]
                 elif pct > 0.9:
-                    w = 10*(1-pct)*self.w[1]
+                    w = 10 * (1 - pct) * self.w[1]
                 else:
                     w = self.w[1]
 
@@ -72,8 +74,8 @@ class OnsetDataset(Dataset):
             y = self.y[item]
             w = self.w[[0, 1].index(y)]
 
-        # Don't discount loss if not training
         if not self.training:
+            # Don't discount loss if not training
             w = self.w[[0, 1].index(y)]
 
         X = X.transpose((1, 0)).astype(np.float32)
@@ -119,43 +121,58 @@ class BlurPool1d(nn.Module):
 
 
 class ResnetBlock(nn.Module):
-    def __init__(self, c_in: int, c_out: int, expand: int, stride: int = 1):
+    def __init__(self, c_in: int, c_out: int, expand: int, stride: int = 1, project: bool = False):
         super().__init__()
 
-        self.bn1 = nn.BatchNorm1d(c_in, eps=BN_EPS, momentum=1 - BN_MOM)
+        self.norm1 = nn.GroupNorm(num_groups=4, num_channels=c_in)
         self.relu1 = nn.ReLU()
         if stride == 2:
             self.blurpool = BlurPool1d(int(c_in))
         else:
             self.blurpool = None
-        self.conv1 = nn.Conv1d(c_in, int(c_in), kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm1d(int(c_in), eps=BN_EPS, momentum=1 - BN_MOM)
+        self.conv1 = nn.Conv1d(in_channels=c_in,
+                               out_channels=int(expand * c_in),
+                               kernel_size=3,
+                               padding=1,
+                               bias=False)
+
+        self.norm2 = nn.GroupNorm(num_groups=4, num_channels=int(expand * c_in))
         self.relu2 = nn.ReLU()
-        self.conv2 = nn.Conv1d(int(c_in), int(c_in * expand), kernel_size=1, padding=0, bias=False)
-        self.bn3 = nn.BatchNorm1d(int(c_in * expand), eps=BN_EPS, momentum=1 - BN_MOM)
-        self.relu3 = nn.ReLU()
-        self.conv3 = nn.Conv1d(int(c_in * expand), c_out, kernel_size=3, padding=1, bias=False)
+        self.conv2 = nn.Conv1d(in_channels=int(expand * c_in),
+                               out_channels=c_out,
+                               kernel_size=3,
+                               padding=1,
+                               bias=False)
+
+        if project:
+            self.conv_proj = weight_norm(nn.Conv1d(in_channels=c_in,
+                                                   out_channels=c_out,
+                                                   kernel_size=1,
+                                                   stride=1,
+                                                   bias=False),
+                                         name='weight')
+        else:
+            self.conv_proj = None
 
         self.stride = stride
+        self.project = project
 
     def forward(self, x):
         x_skip = x
 
-        x = self.bn1(x)
+        x = self.norm1(x)
         x = self.relu1(x)
         if self.stride == 2:
             x = self.blurpool(x)
         x = self.conv1(x)
-        x = self.bn2(x)
+        x = self.norm2(x)
         x = self.relu2(x)
         x = self.conv2(x)
-        x = self.bn3(x)
-        x = self.relu3(x)
-        x = self.conv3(x)
 
-        # We always downsample on first layer in group so that we lose the minimal number of skip connections
-        if self.stride != 1:
-            return x
+        if self.stride == 2:
+            x_skip = self.blurpool(x_skip)
+        if self.project:
+            x_skip = self.conv_proj(x_skip)
 
         return x + x_skip
 
@@ -173,15 +190,21 @@ class OnsetModule(pl.LightningModule):
         self.blocks = nn.ModuleList()
 
         c_in = CFG[0]['dim']
-        self.conv_stem = nn.Conv1d(in_channels=10, out_channels=c_in, kernel_size=9, padding=4, bias=False)
+        self.conv_stem = nn.Conv1d(in_channels=10,
+                                   out_channels=c_in,
+                                   kernel_size=9,
+                                   padding=4,
+                                   bias=False)
 
         features = None
         for cfg in CFG:
             if not cfg['final']:
-                block = ResnetBlock(c_in=c_in, c_out=cfg['dim'], expand=cfg['expand'], stride=cfg['stride'])
+                block = ResnetBlock(c_in=c_in, c_out=cfg['dim'], expand=cfg['expand'], stride=cfg['stride'],
+                                    project=cfg['project'])
             else:
                 features = cfg['dim']
-                block = ResnetBlock(c_in=c_in, c_out=features, expand=cfg['expand'], stride=cfg['stride'])
+                block = ResnetBlock(c_in=c_in, c_out=features, expand=cfg['expand'], stride=cfg['stride'],
+                                    project=cfg['project'])
 
             self.blocks.append(block)
 
@@ -191,7 +214,7 @@ class OnsetModule(pl.LightningModule):
 
             c_in = cfg['dim']
 
-        self.bn_head = nn.BatchNorm1d(features, eps=BN_EPS, momentum=1 - BN_MOM)
+        self.norm_head = nn.GroupNorm(num_channels=features, num_groups=4)
         self.relu_head = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
         self.fc = nn.Linear(int(2 * features), 2, bias=False)
@@ -203,7 +226,7 @@ class OnsetModule(pl.LightningModule):
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv1d):
-                torch.nn.init.kaiming_uniform_(m.weight)
+                torch.nn.init.kaiming_normal_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm1d):
@@ -212,23 +235,21 @@ class OnsetModule(pl.LightningModule):
 
         self.apply(_init)
 
-    def forward(self, x):
+    def forward(self, x: torch.tensor):
 
-        # Batch-wise z-score
+        mu = torch.mean(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
+        sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         if self.training:
-            mu = torch.mean(x)
-            sd = torch.std(x)
-        else:
-            mu = torch.mean(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
-            sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
-
-        x = (x - mu) / sd
+            # Add random noise to normalization statistics
+            mu = mu*(1. + (torch.rand(1, device=x.device) - 0.5)/2.5)
+            sd = sd*(1. + (torch.rand(1, device=x.device) - 0.5)/2.5)
+        x = (x - mu)/sd
 
         x = self.conv_stem(x)
         for block in self.blocks:
             x = block(x)
 
-        x = self.bn_head(x)
+        x = self.norm_head(x)
         x = self.relu_head(x)
         x = F.max_pool1d(x, kernel_size=125, stride=125, padding=0)
         x = x.view((x.size(0), x.size(1) * x.size(2)))
@@ -241,15 +262,6 @@ class OnsetModule(pl.LightningModule):
 
         y = self.forward(X)
         loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
-
-        if L2 > 0.:
-            l2 = torch.sum(L2 * torch.pow(self.conv_stem.weight, 2))
-            for block in self.blocks:
-                l2 += torch.sum(L2 * torch.pow(block.conv1.weight, 2))
-                l2 += torch.sum(L2 * torch.pow(block.conv2.weight, 2))
-                l2 += torch.sum(L2 * torch.pow(block.conv3.weight, 2))
-
-            loss += l2
 
         self.log('train_loss', loss, prog_bar=False, logger=True)
         self.log('lr', self.optimizers().param_groups[0]['lr'])
@@ -276,15 +288,16 @@ class OnsetModule(pl.LightningModule):
         self._test_pred = np.concatenate(self._test_pred, axis=0)
         self._test_true = np.concatenate(self._test_true, axis=0)
 
-        self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
-
-        tn, fp, fn, tp = confusion_matrix(y_true=self._test_true.astype(np.int),
-                                          y_pred=np.round(self._test_pred).astype(np.int)).ravel()
-
-        print("\n\n----Confusion Matrix----")
-        print("\t[neg\t\tpos\t\t]")
-        print("neg\t[%d\t\t%d\t]" % (tn, fp))
-        print("pos\t[%d\t\t%d\t]\n" % (fn, tp))
+        try:
+            self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
+            tn, fp, fn, tp = confusion_matrix(y_true=self._test_true.astype(np.int),
+                                              y_pred=np.round(self._test_pred).astype(np.int)).ravel()
+            print("\n\n----Confusion Matrix----")
+            print("\t[neg\t\tpos\t\t]")
+            print("neg\t[%d\t\t%d\t]" % (tn, fp))
+            print("pos\t[%d\t\t%d\t]\n" % (fn, tp))
+        except ValueError:
+            pass
 
         self._test_true = []
         self._test_pred = []
@@ -325,22 +338,25 @@ class OnsetModule(pl.LightningModule):
         self._test_pred = []
 
     def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.parameters(),
-                                    lr=0.0001,
-                                    momentum=0.9)
-        schedule = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=15, gamma=0.5)
+        inner_optimizer = SGDW(self.parameters(),
+                               lr=LR,
+                               momentum=MOMENTUM,
+                               weight_decay=WEIGHT_DECAY)
+        optimizer = Lookahead(inner_optimizer)
+        schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer, step_size=15, gamma=0.5)
         return [optimizer], [schedule]
 
     def train_dataloader(self):
         return DataLoader(OnsetDataset(self.X_train, self.y_train),
                           shuffle=True,
                           drop_last=True,
-                          batch_size=BATCH_SIZE)
+                          batch_size=BATCH_SIZE,
+                          num_workers=NUM_WORKERS)
 
     def val_dataloader(self):
         return DataLoader(OnsetDataset(self.X_test, self.y_test, training=False),
-                          shuffle=True,
-                          batch_size=BATCH_SIZE)
+                          batch_size=BATCH_SIZE,
+                          num_workers=NUM_WORKERS)
 
     def test_dataloader(self):
         return self.val_dataloader()
