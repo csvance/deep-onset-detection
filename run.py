@@ -144,7 +144,13 @@ class OnsetModule(LightningModule):
 
         # Batch-wise z-score
         if self.training:
-            x = (x - torch.mean(x)) / torch.std(x)
+            mu = torch.mean(x)
+            sd = torch.std(x)
+        else:
+            mu = torch.mean(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
+            sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
+
+        x = (x - mu) / sd
 
         x = self.conv_stem(x)
         for block in self.blocks:
@@ -226,7 +232,9 @@ class OnsetModule(LightningModule):
         return {'test_loss': avg_loss}
 
     def configure_optimizers(self):
-        inner_optimizer = torch.optim.SGD(self.parameters(), lr=0.0001)
+        inner_optimizer = torch.optim.SGD(self.parameters(),
+                                          lr=0.0001,
+                                          weight_decay=WEIGHT_DECAY)
         optimizer = Lookahead(inner_optimizer)
         schedule = {'scheduler': OneCycleLR(inner_optimizer,
                                             max_lr=LR_MAX,
