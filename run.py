@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import plac
 import numpy as np
 
-D = 32
+D = 16
 BN_EPS = 1e-5
 BN_MOM = 0.99
 BATCH_SIZE = 16
@@ -141,11 +141,11 @@ class ResnetBlock(nn.Module):
 
         x = self.bn1(x)
         x = self.relu1(x)
+        if self.stride == 2:
+            x = self.blurpool(x)
         x = self.conv1(x)
         x = self.bn2(x)
         x = self.relu2(x)
-        if self.stride == 2:
-            x = self.blurpool(x)
         x = self.conv2(x)
         x = self.bn3(x)
         x = self.relu3(x)
@@ -171,18 +171,14 @@ class OnsetModule(LightningModule):
         self.blocks = nn.ModuleList()
 
         c_in = CFG[0]['dim']
-        self.conv_stem1 = nn.Conv1d(in_channels=10, out_channels=c_in, kernel_size=9, padding=4, bias=False)
-        self.bn_stem = nn.BatchNorm1d(c_in, momentum=1-BN_MOM, eps=BN_EPS)
-        self.relu_stem = nn.ReLU()
-        self.blurpool_stem = BlurPool1d(c_in)
-        self.conv_stem2 = nn.Conv1d(in_channels=c_in, out_channels=c_in, kernel_size=3, padding=1, bias=False)
+        self.conv_stem = nn.Conv1d(in_channels=10, out_channels=c_in, kernel_size=9, padding=4, bias=False)
 
         features = None
         for cfg in CFG:
             if not cfg['final']:
                 block = ResnetBlock(c_in=c_in, c_out=cfg['dim'], expand=cfg['expand'], stride=cfg['stride'])
             else:
-                features = 4 * cfg['dim']
+                features = cfg['dim']
                 block = ResnetBlock(c_in=c_in, c_out=features, expand=cfg['expand'], stride=cfg['stride'])
 
             self.blocks.append(block)
@@ -196,6 +192,7 @@ class OnsetModule(LightningModule):
         self.bn_head = nn.BatchNorm1d(features, eps=BN_EPS, momentum=1 - BN_MOM)
         self.relu_head = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
+        self.lstm = nn.LSTM(input_size=features, hidden_size=features)
         self.fc = nn.Linear(features, 2)
 
     def init(self):
@@ -225,19 +222,16 @@ class OnsetModule(LightningModule):
 
         x = (x - mu) / sd
 
-        x = self.conv_stem1(x)
-        x = self.bn_stem(x)
-        x = self.relu_stem(x)
-        x = self.blurpool_stem(x)
-        x = self.conv_stem2(x)
-
+        x = self.conv_stem(x)
         for block in self.blocks:
             x = block(x)
 
         x = self.bn_head(x)
         x = self.relu_head(x)
-        x = self.pool_head(x)[:, :, 0]
-        y = self.fc(x)
+        x = F.max_pool1d(x, kernel_size=50, stride=50, padding=0)
+        x = x.permute(0, 2, 1)
+        x, _ = self.lstm(x)
+        y = self.fc(x[:, -1, :])
 
         return y
 
@@ -246,18 +240,19 @@ class OnsetModule(LightningModule):
 
         y = self.forward(X)
         loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
-        self.log('train_loss', loss.item(), prog_bar=False, logger=True)
 
         if L2 > 0.:
-            l2 = torch.sum(L2 * torch.pow(self.conv_stem1.weight, 2))
-            l2 += torch.sum(L2 * torch.pow(self.conv_stem2.weight, 2))
+            l2 = torch.sum(L2 * torch.pow(self.conv_stem.weight, 2))
             for block in self.blocks:
                 l2 += torch.sum(L2 * torch.pow(block.conv1.weight, 2))
                 l2 += torch.sum(L2 * torch.pow(block.conv2.weight, 2))
                 l2 += torch.sum(L2 * torch.pow(block.conv3.weight, 2))
-            self.log('l2_loss', l2, prog_bar=False, logger=True)
+            l2 += torch.sum(L2 * torch.pow(self.lstm.weight_ih_l0, 2))
+            l2 += torch.sum(L2 * torch.pow(self.fc.weight, 2))
+
             loss += l2
 
+        self.log('train_loss', loss, prog_bar=False, logger=True)
         self.log('lr', self.optimizers().param_groups[0]['lr'])
         self.log('momentum', self.optimizers().param_groups[0]['momentum'])
 
