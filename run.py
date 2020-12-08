@@ -1,24 +1,23 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import plac
 import pytorch_lightning as pl
+import seaborn as sns
 import torch
-from torch import nn
 import torch.nn.functional as F
-from torch_optimizer import SGDW
-from torch_optimizer import Lookahead
-from torch.nn.utils import weight_norm
 from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
+from torch import nn
 from torch.utils.data import Dataset, DataLoader
-import seaborn as sns
-import matplotlib.pyplot as plt
+from torch_optimizer import Lookahead, SGDW
 
 D = 32
-BATCH_SIZE = 8
-LR = 0.005
-MOMENTUM = 0.95
-WEIGHT_DECAY = 0.025
+BATCH_SIZE = 16
+LR = 0.1
+MOMENTUM = 0.9
+WEIGHT_DECAY = 0.001
 EPOCHS = 75
+GAMMA = 0.5
 NUM_WORKERS = 0
 GROUPS = 4
 
@@ -146,12 +145,11 @@ class ResnetBlock(nn.Module):
                                bias=False)
 
         if project:
-            self.conv_proj = weight_norm(nn.Conv1d(in_channels=c_in,
-                                                   out_channels=c_out,
-                                                   kernel_size=1,
-                                                   stride=1,
-                                                   bias=False),
-                                         name='weight')
+            self.conv_proj = nn.Conv1d(in_channels=c_in,
+                                       out_channels=c_out,
+                                       kernel_size=1,
+                                       stride=1,
+                                       bias=False)
         else:
             self.conv_proj = None
 
@@ -218,7 +216,7 @@ class OnsetModule(pl.LightningModule):
         self.norm_head = nn.GroupNorm(num_groups=GROUPS, num_channels=features)
         self.relu_head = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
-        self.fc = nn.Linear(features, 2, bias=False)
+        self.fc = nn.Linear(features, 2, bias=True)
 
     def init(self):
         def _init(m):
@@ -337,12 +335,32 @@ class OnsetModule(pl.LightningModule):
         self._test_pred = []
 
     def configure_optimizers(self):
-        inner_optimizer = SGDW(self.parameters(),
+        params_wd = nn.ParameterList()
+        params_nowd = nn.ParameterList()
+
+        for m in self.modules():
+            for name, param in m.named_parameters(recurse=False):
+                if not param.requires_grad:
+                    continue
+                if 'bias' in name:
+                    params_nowd.append(param)
+                elif isinstance(m, nn.Conv1d):
+                    params_wd.append(param)
+                elif isinstance(m, nn.Linear):
+                    params_nowd.append(param)
+        params = [
+            {'params': params_wd, 'weight_decay': WEIGHT_DECAY},
+            {'params': params_nowd, 'weight_decay': 0.}
+        ]
+
+        inner_optimizer = SGDW(params,
                                lr=LR,
-                               momentum=MOMENTUM,
-                               weight_decay=WEIGHT_DECAY)
+                               momentum=MOMENTUM)
         optimizer = Lookahead(inner_optimizer)
-        schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer, step_size=15, gamma=0.5)
+        schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer,
+                                                   gamma=GAMMA,
+                                                   step_size=15)
+
         return [optimizer], [schedule]
 
     def train_dataloader(self):
