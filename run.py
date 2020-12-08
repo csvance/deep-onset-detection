@@ -14,7 +14,7 @@ D = 16
 BN_EPS = 1e-5
 BN_MOM = 0.99
 BATCH_SIZE = 16
-WEIGHT_DECAY = 1e-3
+WEIGHT_DECAY = 1e-2
 EPOCHS = 30
 LR_MAX = 0.01
 
@@ -110,7 +110,7 @@ class OnsetModule(LightningModule):
         self.X_train, self.y_train = Xy_train
         self.X_test, self.y_test = Xy_test
 
-        self._test_logits = []
+        self._test_pred = []
         self._test_true = []
 
         self.blocks = nn.ModuleList()
@@ -182,7 +182,7 @@ class OnsetModule(LightningModule):
 
         loss = F.cross_entropy(y, y_target)
 
-        self._test_logits.append(y[:, 1].detach().cpu().numpy())
+        self._test_pred.append(F.softmax(y.detach())[:, 1].cpu().numpy())
         self._test_true.append(y_target.detach().cpu().numpy())
 
         return {'val_loss': loss}
@@ -192,13 +192,13 @@ class OnsetModule(LightningModule):
 
         self.log('val_loss', avg_loss, prog_bar=False, logger=True)
 
-        self._test_logits = np.concatenate(self._test_logits, axis=0)
+        self._test_pred = np.concatenate(self._test_pred, axis=0)
         self._test_true = np.concatenate(self._test_true, axis=0)
 
-        self.log('val_auc', roc_auc_score(self._test_true, self._test_logits))
+        self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
 
         self._test_true = []
-        self._test_logits = []
+        self._test_pred = []
 
         return {'val_loss': avg_loss}
 
@@ -208,7 +208,7 @@ class OnsetModule(LightningModule):
 
         loss = F.cross_entropy(y, y_target)
 
-        self._test_logits.append(y[:, 1].detach().cpu().numpy())
+        self._test_pred.append(F.softmax(y.detach())[:, 1].cpu().numpy())
         self._test_true.append(y_target.detach().cpu().numpy())
 
         return {'test_loss': loss}
@@ -218,16 +218,16 @@ class OnsetModule(LightningModule):
 
         self.log('test_loss', avg_loss, prog_bar=False, logger=True)
 
-        self._test_logits = np.concatenate(self._test_logits, axis=0)
+        self._test_pred = np.concatenate(self._test_pred, axis=0)
         self._test_true = np.concatenate(self._test_true, axis=0)
 
-        self.log('test_auc', roc_auc_score(self._test_true, self._test_logits))
+        self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
 
         self._test_true = []
-        self._test_logits = []
+        self._test_pred = []
 
         self._test_true = []
-        self._test_logits = []
+        self._test_pred = []
 
         return {'test_loss': avg_loss}
 
