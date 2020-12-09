@@ -221,11 +221,11 @@ class OnsetModule(pl.LightningModule):
     def init(self):
         def _init(m):
             if isinstance(m, nn.Linear):
-                torch.nn.init.kaiming_uniform_(m.weight)
+                torch.nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv1d):
-                torch.nn.init.kaiming_uniform_(m.weight)
+                torch.nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
 
