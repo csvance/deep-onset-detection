@@ -22,9 +22,9 @@ NUM_WORKERS = 0
 GROUPS = 4
 
 CFG = [
-    {'repeat': 1, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'final': False, 'project': True},
-    {'repeat': 3, 'dim': int(2 * D), 'expand': 1, 'stride': 2, 'final': False, 'project': True},
-    {'repeat': 1, 'dim': int(4 * D), 'expand': 1, 'stride': 2, 'final': True, 'project': True},
+    {'repeat': 3, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 4, 'dim': int(2 * D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 2, 'dim': int(4 * D), 'expand': 1, 'stride': 2, 'project': True},
 ]
 
 
@@ -144,15 +144,6 @@ class ResnetBlock(nn.Module):
                                padding=1,
                                bias=False)
 
-        if project:
-            self.conv_proj = nn.Conv1d(in_channels=c_in,
-                                       out_channels=c_out,
-                                       kernel_size=1,
-                                       stride=1,
-                                       bias=False)
-        else:
-            self.conv_proj = None
-
         self.stride = stride
         self.project = project
 
@@ -168,10 +159,8 @@ class ResnetBlock(nn.Module):
         x = self.relu2(x)
         x = self.conv2(x)
 
-        if self.stride == 2:
-            x_skip = self.blurpool(x_skip)
-        if self.project:
-            x_skip = self.conv_proj(x_skip)
+        if self.stride == 2 or self.project:
+            return x
 
         return x + x_skip
 
@@ -195,28 +184,34 @@ class OnsetModule(pl.LightningModule):
                                    padding=4,
                                    bias=False)
 
-        features = None
         for cfg in CFG:
-            if not cfg['final']:
-                block = ResnetBlock(c_in=c_in, c_out=cfg['dim'], expand=cfg['expand'], stride=cfg['stride'],
-                                    project=cfg['project'])
-            else:
-                features = cfg['dim']
-                block = ResnetBlock(c_in=c_in, c_out=features, expand=cfg['expand'], stride=cfg['stride'],
-                                    project=cfg['project'])
 
+            block = ResnetBlock(c_in=c_in,
+                                c_out=cfg['dim'],
+                                expand=cfg['expand'],
+                                stride=cfg['stride'],
+                                project=cfg['project'])
             self.blocks.append(block)
 
             for i in range(1, cfg['repeat'] - 1):
-                block = ResnetBlock(c_in=cfg['dim'], c_out=cfg['dim'], expand=cfg['expand'])
+                block = ResnetBlock(c_in=cfg['dim'],
+                                    c_out=cfg['dim'],
+                                    expand=cfg['expand'])
                 self.blocks.append(block)
 
             c_in = cfg['dim']
 
-        self.norm_head = nn.GroupNorm(num_groups=GROUPS, num_channels=features)
+        self.norm_head = nn.GroupNorm(num_groups=GROUPS, num_channels=c_in)
         self.relu_head = nn.ReLU()
+        self.conv_head = nn.Conv1d(in_channels=c_in,
+                                   out_channels=int(4*c_in),
+                                   kernel_size=1,
+                                   groups=c_in,
+                                   bias=False)
+        c_in = int(4*c_in)
+
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
-        self.fc = nn.Linear(features, 2, bias=True)
+        self.fc = nn.Linear(c_in, 2, bias=True)
 
     def init(self):
         def _init(m):
@@ -243,11 +238,12 @@ class OnsetModule(pl.LightningModule):
         x = (x - mu) / sd
 
         x = self.conv_stem(x)
-        for block in self.blocks:
+        for idx, block in enumerate(self.blocks):
             x = block(x)
 
         x = self.norm_head(x)
         x = self.relu_head(x)
+        x = self.conv_head(x)
         x = self.pool_head(x)[:, :, 0]
         y = self.fc(x)
 
