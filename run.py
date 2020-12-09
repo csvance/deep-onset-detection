@@ -4,6 +4,7 @@ import plac
 import pytorch_lightning as pl
 import seaborn as sns
 import torch
+from pytorch_lightning.loggers import TensorBoardLogger
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
@@ -12,25 +13,22 @@ from torch.utils.data import Dataset, DataLoader
 from torch_optimizer import Lookahead
 from torch.optim.lr_scheduler import OneCycleLR
 
+PLOT = False
+HISTO = True
+
 D = 32
 SE = 4
 
 BN_EPS = 0.001
 BN_MOM = 0.01
 
-EPOCHS = 3
+EPOCHS = 2
 BATCH_SIZE = 16
 MOMENTUM = 0.9
 LR = 0.01
 
 WEIGHT_DECAY = 0.001
-DROPOUT = 0.5
-
-CFG = [
-    {'repeat': 2, 'dim': int(1 * D), 'stride': 2, 'project': False, 'se': SE},
-    {'repeat': 3, 'dim': int(2 * D), 'stride': 2, 'project': True, 'se': SE},
-    {'repeat': 1, 'dim': int(4 * D), 'stride': 2, 'project': True, 'se': SE},
-]
+DROPOUT = 0.2
 
 
 class OnsetDataset(Dataset):
@@ -189,26 +187,51 @@ class ResnetBlock(nn.Module):
 
 
 class OnsetModule(pl.LightningModule):
-    def __init__(self, Xy_train, Xy_valid, Xy_test):
-        super().__init__()
+    def __init__(self, Xy_train=None, Xy_valid=None, Xy_test=None,
+                 epochs: int = EPOCHS,
+                 lr: float = LR,
+                 dropout: float = DROPOUT,
+                 weight_decay: float = WEIGHT_DECAY,
+                 d: int = D,
+                 se: int = SE):
 
-        self.X_train, self.y_train = Xy_train
-        self.X_valid, self.y_valid = Xy_valid
-        self.X_test, self.y_test = Xy_test
+        super().__init__()
+        self.save_hyperparameters('d', 'epochs', 'lr', 'weight_decay', 'dropout', 'se')
+
+        if Xy_train is not None:
+            self.X_train, self.y_train = Xy_train
+        else:
+            self.X_train, self.y_train = None, None
+
+        if Xy_valid is not None:
+            self.X_valid, self.y_valid = Xy_valid
+        else:
+            self.X_valid, self.y_valid = None, None
+
+        if Xy_test is not None:
+            self.X_test, self.y_test = Xy_test
+        else:
+            self.X_test, self.y_test = None, None
 
         self._test_pred = []
         self._test_true = []
 
         self.blocks = nn.ModuleList()
 
-        c_in = CFG[0]['dim']
+        blocks = [
+            {'repeat': 2, 'dim': int(1 * d), 'stride': 2, 'project': False, 'se': se},
+            {'repeat': 3, 'dim': int(2 * d), 'stride': 2, 'project': True, 'se': se},
+            {'repeat': 1, 'dim': int(4 * d), 'stride': 2, 'project': True, 'se': se},
+        ]
+
+        c_in = blocks[0]['dim']
         self.conv_stem = nn.Conv1d(in_channels=10,
                                    out_channels=c_in,
                                    kernel_size=9,
                                    padding=4,
                                    bias=False)
 
-        for cfg in CFG:
+        for cfg in blocks:
             block = ResnetBlock(c_in=c_in,
                                 c_out=cfg['dim'],
                                 stride=cfg['stride'],
@@ -227,8 +250,12 @@ class OnsetModule(pl.LightningModule):
         self.norm_head1 = nn.BatchNorm1d(num_features=c_in, momentum=BN_MOM, eps=BN_EPS)
         self.relu_head1 = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
-        self.dropout = nn.Dropout(DROPOUT)
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(c_in, 2, bias=True)
+
+        self._weight_decay = weight_decay
+        self._lr = lr
+        self._epochs = epochs
 
     def init(self):
         def _init(m):
@@ -308,20 +335,22 @@ class OnsetModule(pl.LightningModule):
         try:
             self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
 
-            cm = confusion_matrix(y_true=self._test_true.astype(np.int),
-                                  y_pred=np.round(self._test_pred).astype(np.int),
-                                  normalize='true')
-            ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
-            ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
-            plt.show()
+            if PLOT:
+                cm = confusion_matrix(y_true=self._test_true.astype(np.int),
+                                      y_pred=np.round(self._test_pred).astype(np.int),
+                                      normalize='true')
+                ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
+                ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
+                plt.show()
 
         except ValueError:
             pass
 
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                if 'conv' in name or 'fc' in name:
-                    self.logger.experiment.add_histogram(name, param, self.global_step)
+        if HISTO:
+            for name, param in self.named_parameters():
+                if param.requires_grad:
+                    if 'conv' in name or 'fc' in name:
+                        self.logger.experiment.add_histogram(name, param, self.global_step)
 
         self._test_true = []
         self._test_pred = []
@@ -348,12 +377,13 @@ class OnsetModule(pl.LightningModule):
         try:
             self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
 
-            cm = confusion_matrix(y_true=self._test_true.astype(np.int),
-                                  y_pred=np.round(self._test_pred).astype(np.int),
-                                  normalize='true')
-            ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
-            ax.set_title('Confusion Matrix - Test')
-            plt.show()
+            if PLOT:
+                cm = confusion_matrix(y_true=self._test_true.astype(np.int),
+                                      y_pred=np.round(self._test_pred).astype(np.int),
+                                      normalize='true')
+                ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
+                ax.set_title('Confusion Matrix - Test')
+                plt.show()
         except ValueError:
             pass
 
@@ -365,13 +395,13 @@ class OnsetModule(pl.LightningModule):
 
     def configure_optimizers(self):
         inner_optimizer = torch.optim.SGD(self.parameters(),
-                                          lr=LR,
-                                          momentum=MOMENTUM,
-                                          weight_decay=WEIGHT_DECAY)
+                                          lr=self._lr,
+                                          momentum=0.9,
+                                          weight_decay=self._weight_decay)
         optimizer = Lookahead(inner_optimizer)
         schedule = {'scheduler': OneCycleLR(inner_optimizer,
-                                            max_lr=LR,
-                                            epochs=EPOCHS,
+                                            max_lr=self._lr,
+                                            epochs=self._epochs,
                                             steps_per_epoch=int(
                                                 len(self.X_train) / BATCH_SIZE),
                                             verbose=False),
@@ -397,10 +427,11 @@ class OnsetModule(pl.LightningModule):
                           batch_size=BATCH_SIZE)
 
 
-@plac.annotations(seed=('Random seed', 'option', 'S', int))
-def main(seed: int = 0):
-    pl.seed_everything(seed)
-
+@plac.annotations(seed=('Random seed', 'option', 'S', int),
+                  random=('Perform random hyperparm search', 'option', 'R', int)
+                  )
+def main(seed: int = 0,
+         random: int = 1):
     Xy_train = np.load('data/train.npy', mmap_mode='r')
 
     X_train = Xy_train[:, :, 1:11]
@@ -414,25 +445,63 @@ def main(seed: int = 0):
     X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
     y_test = np.load('data/test_labels.p', mmap_mode='r')
 
-    model = OnsetModule((X_train, y_train),
-                        (X_valid, y_valid),
-                        (X_test, y_test))
-    model.init()
+    for r in range(0, random):
+        if random > 1:
+            pl.seed_everything(r)
+            d = int(np.random.choice([16, 32, 64]))
+            epochs = int(np.random.choice([1, 2, 3]))
+            dropout = float(np.random.choice([0., 0.1, 0.2, 0.3, 0.4, 0.5]))
+            lr = float(np.random.choice([0.05, 0.025, 0.01, 0.0075, 0.005, 0.0025, 0.001]))
+            weight_decay = float(np.random.choice([0.0001, 0.0005, 0.001, 0.005]))
+            se = SE
+        else:
+            pl.seed_everything(seed)
+            d = D
+            dropout = DROPOUT
+            lr = LR
+            weight_decay = WEIGHT_DECAY
+            se = SE
+            epochs = EPOCHS
 
-    cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                 monitor='val_auc',
-                                                 mode='max',
-                                                 verbose=True)
-    trainer = pl.Trainer(gpus=1,
-                         precision=32,
-                         max_epochs=EPOCHS,
-                         log_every_n_steps=5,
-                         flush_logs_every_n_steps=5,
-                         callbacks=[cb_checkpoint],
-                         deterministic=True,
-                         val_check_interval=0.05)
-    trainer.fit(model)
-    trainer.test(ckpt_path=cb_checkpoint.best_model_path)
+        model = OnsetModule((X_train, y_train),
+                            (X_valid, y_valid),
+                            (X_test, y_test),
+                            d=d,
+                            epochs=epochs,
+                            lr=lr,
+                            weight_decay=weight_decay,
+                            dropout=dropout,
+                            se=se)
+
+        model.init()
+        if random > 1:
+            logger = TensorBoardLogger('lightning_logs', name='random')
+            cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
+                                                         filename='random_%d.ckpt' % r,
+                                                         monitor='val_auc',
+                                                         mode='max',
+                                                         verbose=True)
+        else:
+            logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed)
+            cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
+                                                         filename='seed_%d.ckpt' % seed,
+                                                         monitor='val_auc',
+                                                         mode='max',
+                                                         verbose=True)
+
+        trainer = pl.Trainer(gpus=1,
+                             precision=32,
+                             max_epochs=epochs,
+                             log_every_n_steps=5,
+                             flush_logs_every_n_steps=5,
+                             callbacks=[cb_checkpoint],
+                             deterministic=True,
+                             val_check_interval=0.1,
+                             logger=logger)
+
+        trainer.fit(model)
+        results = trainer.test()
+        logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
 
 
 if __name__ == '__main__':
