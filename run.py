@@ -10,6 +10,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch_optimizer import Lookahead
+from torch.optim.lr_scheduler import OneCycleLR
 
 D = 32
 SE = 4
@@ -17,20 +18,17 @@ SE = 4
 BN_EPS = 0.001
 BN_MOM = 0.01
 
+EPOCHS = 3
 BATCH_SIZE = 16
 MOMENTUM = 0.9
-LR = 0.0001
-WEIGHT_DECAY = 0.001
+LR = 0.01
 
+WEIGHT_DECAY = 0.001
 DROPOUT = 0.5
 
-SCHED_EPOCHS = 75
-SCHED_GAMMA = 0.5
-SCHED_STEP = 15
-
 CFG = [
-    {'repeat': 1, 'dim': int(1 * D), 'stride': 2, 'project': False, 'se': SE},
-    {'repeat': 1, 'dim': int(2 * D), 'stride': 2, 'project': True, 'se': SE},
+    {'repeat': 2, 'dim': int(1 * D), 'stride': 2, 'project': False, 'se': SE},
+    {'repeat': 3, 'dim': int(2 * D), 'stride': 2, 'project': True, 'se': SE},
     {'repeat': 1, 'dim': int(4 * D), 'stride': 2, 'project': True, 'se': SE},
 ]
 
@@ -146,9 +144,9 @@ class ResnetBlock(nn.Module):
 
         if se > 1:
             self.se_pool = nn.AdaptiveMaxPool1d((1,))
-            self.conv_squeeze = nn.Conv1d(c_in, int(c_in/se), kernel_size=1, bias=False)
+            self.conv_squeeze = nn.Conv1d(c_in, int(c_in / se), kernel_size=1, bias=False)
             self.se_relu = nn.ReLU()
-            self.conv_excite = nn.Conv1d(int(c_in/se), int(c_in), kernel_size=1, bias=False)
+            self.conv_excite = nn.Conv1d(int(c_in / se), int(c_in), kernel_size=1, bias=False)
             self.se_sigmoid = nn.Sigmoid()
         else:
             self.se_pool = None
@@ -177,7 +175,7 @@ class ResnetBlock(nn.Module):
             x_se = self.se_relu(x_se)
             x_se = self.conv_excite(x_se)
             x_se = self.se_sigmoid(x_se)
-            x = x*x_se
+            x = x * x_se
 
         x = self.conv2(x)
 
@@ -254,12 +252,12 @@ class OnsetModule(pl.LightningModule):
             # Add random noise to normalization statistics
             mu_r = torch.rand(1, device=x.device) + 1.
             if np.random.random() <= 0.5:
-                mu_r = 1./mu_r
+                mu_r = 1. / mu_r
             mu *= mu_r
 
             sd_r = torch.rand(1, device=x.device) + 1.
             if np.random.random() <= 0.5:
-                sd_r = 1./sd_r
+                sd_r = 1. / sd_r
             sd *= sd_r
 
         x = (x - mu) / sd
@@ -371,9 +369,16 @@ class OnsetModule(pl.LightningModule):
                                           momentum=MOMENTUM,
                                           weight_decay=WEIGHT_DECAY)
         optimizer = Lookahead(inner_optimizer)
-        schedule = torch.optim.lr_scheduler.StepLR(optimizer=optimizer,
-                                                   step_size=SCHED_STEP,
-                                                   gamma=SCHED_GAMMA)
+        schedule = {'scheduler': OneCycleLR(inner_optimizer,
+                                            max_lr=LR,
+                                            epochs=EPOCHS,
+                                            steps_per_epoch=int(
+                                                len(self.X_train) / BATCH_SIZE),
+                                            verbose=False),
+                    'name': 'learning_rate',
+                    'interval': 'step',
+                    'frequency': 1
+                    }
 
         return [optimizer], [schedule]
 
@@ -420,11 +425,12 @@ def main(seed: int = 0):
                                                  verbose=True)
     trainer = pl.Trainer(gpus=1,
                          precision=32,
-                         max_epochs=SCHED_EPOCHS,
+                         max_epochs=EPOCHS,
                          log_every_n_steps=5,
-                         flush_logs_every_n_steps=1,
+                         flush_logs_every_n_steps=5,
                          callbacks=[cb_checkpoint],
-                         deterministic=True)
+                         deterministic=True,
+                         val_check_interval=0.05)
     trainer.fit(model)
     trainer.test(ckpt_path=cb_checkpoint.best_model_path)
 
