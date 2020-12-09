@@ -9,15 +9,14 @@ from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
-from torch_optimizer import Lookahead, SGDW
-from torch.nn.utils import weight_norm
+from torch_optimizer import Lookahead
 
 HYPER_D = 32
 HYPER_GROUPS = 4
 
 OPT_BATCH_SIZE = 16
 OPT_MOMENTUM = 0.9
-OPT_LR = 0.1
+OPT_LR = 0.01
 OPT_WEIGHT_DECAY = 0.001
 
 SCHED_EPOCHS = 75
@@ -120,7 +119,7 @@ class ResnetBlock(nn.Module):
     def __init__(self, c_in: int, c_out: int, expand: int, stride: int = 1, project: bool = False):
         super().__init__()
 
-        self.norm1 = nn.GroupNorm(num_groups=HYPER_GROUPS, num_channels=c_in)
+        self.norm1 = nn.BatchNorm1d(num_features=int(c_in), momentum=0.01, eps=0.001)
         self.relu1 = nn.ReLU()
         if stride == 2:
             self.blurpool = BlurPool1d(int(c_in))
@@ -132,13 +131,14 @@ class ResnetBlock(nn.Module):
                                padding=1,
                                bias=False)
 
-        self.norm2 = nn.GroupNorm(num_groups=HYPER_GROUPS, num_channels=int(expand * c_in))
+        self.norm2 = nn.BatchNorm1d(num_features=int(expand * c_in), momentum=0.01, eps=0.001)
+
         self.relu2 = nn.ReLU()
         self.conv2 = nn.Conv1d(in_channels=int(expand * c_in),
                                out_channels=c_out,
                                kernel_size=3,
                                padding=1,
-                               bias=False)
+                               bias=True)
 
         self.stride = stride
         self.project = project
@@ -179,7 +179,7 @@ class OnsetModule(pl.LightningModule):
                                    out_channels=c_in,
                                    kernel_size=9,
                                    padding=4,
-                                   bias=False)
+                                   bias=True)
 
         for cfg in CFG:
 
@@ -198,27 +198,20 @@ class OnsetModule(pl.LightningModule):
 
             c_in = cfg['dim']
 
-        self.norm_head = nn.GroupNorm(num_groups=HYPER_GROUPS, num_channels=c_in)
+        self.norm_head = nn.BatchNorm1d(num_features=c_in, momentum=0.01, eps=0.001)
         self.relu_head = nn.ReLU()
-        self.conv_head = weight_norm(nn.Conv1d(in_channels=c_in,
-                                               out_channels=int(4 * c_in),
-                                               kernel_size=1,
-                                               groups=c_in,
-                                               bias=False),
-                                     name='weight')
-        c_in = int(4 * c_in)
-
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
+        self.dropout = nn.Dropout(0.5)
         self.fc = nn.Linear(c_in, 2, bias=True)
 
     def init(self):
         def _init(m):
             if isinstance(m, nn.Linear):
-                torch.nn.init.xavier_uniform_(m.weight)
+                torch.nn.init.kaiming_normal_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv1d):
-                torch.nn.init.xavier_uniform_(m.weight)
+                torch.nn.init.kaiming_normal_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
 
@@ -241,8 +234,8 @@ class OnsetModule(pl.LightningModule):
 
         x = self.norm_head(x)
         x = self.relu_head(x)
-        x = self.conv_head(x)
         x = self.pool_head(x)[:, :, 0]
+        x = self.dropout(x)
         y = self.fc(x)
 
         return y
@@ -258,6 +251,15 @@ class OnsetModule(pl.LightningModule):
         self.log('momentum', self.optimizers().param_groups[0]['momentum'])
 
         return {'loss': loss}
+
+    def on_after_backward(self):
+        global_step = self.global_step
+        if self.global_step % 250 == 0:
+            for name, param in self.named_parameters():
+                if param.requires_grad:
+                    if 'conv' in name or 'fc' in name:
+                        self.logger.experiment.add_histogram(name, param, global_step)
+                        self.logger.experiment.add_histogram(f"{name}_grad", param.grad, global_step)
 
     def validation_step(self, batch, batch_nb):
         X, y_target, w = batch
@@ -332,27 +334,10 @@ class OnsetModule(pl.LightningModule):
         self._test_pred = []
 
     def configure_optimizers(self):
-        params_wd = nn.ParameterList()
-        params_nowd = nn.ParameterList()
-
-        for m in self.modules():
-            for name, param in m.named_parameters(recurse=False):
-                if not param.requires_grad:
-                    continue
-                if 'bias' in name:
-                    params_nowd.append(param)
-                elif isinstance(m, nn.Conv1d):
-                    params_wd.append(param)
-                elif isinstance(m, nn.Linear):
-                    params_nowd.append(param)
-        params = [
-            {'params': params_wd, 'weight_decay': OPT_WEIGHT_DECAY},
-            {'params': params_nowd, 'weight_decay': 0.}
-        ]
-
-        inner_optimizer = SGDW(params,
-                               lr=OPT_LR,
-                               momentum=OPT_MOMENTUM)
+        inner_optimizer = torch.optim.SGD(self.parameters(),
+                                          lr=OPT_LR,
+                                          momentum=OPT_MOMENTUM,
+                                          weight_decay=OPT_WEIGHT_DECAY)
         optimizer = Lookahead(inner_optimizer)
         schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer,
                                                    step_size=SCHED_STEP,
