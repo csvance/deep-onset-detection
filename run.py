@@ -11,13 +11,14 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch_optimizer import Lookahead
 
-HYPER_D = 32
+HYPER_D = 16
 HYPER_GROUPS = 4
 
 OPT_BATCH_SIZE = 16
 OPT_MOMENTUM = 0.9
 OPT_LR = 0.01
 OPT_WEIGHT_DECAY = 0.001
+STOCHASTIC_DEPTH = 0.2
 
 SCHED_EPOCHS = 75
 SCHED_GAMMA = 0.5
@@ -26,8 +27,37 @@ SCHED_STEP = 15
 CFG = [
     {'repeat': 3, 'dim': int(1 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
     {'repeat': 4, 'dim': int(2 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
-    {'repeat': 2, 'dim': int(4 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 6, 'dim': int(4 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 3, 'dim': int(8 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
 ]
+
+
+def drop_connect(inputs, p, training):
+    """Drop connect.
+
+    Args:
+        input (tensor: BCWH): Input of this structure.
+        p (float: 0.0~1.0): Probability of drop connection.
+        training (bool): The running mode.
+
+    Returns:
+        output: Output after drop connection.
+    """
+    assert 0 <= p <= 1, 'p must be in range of [0,1]'
+
+    if not training:
+        return inputs
+
+    batch_size = inputs.shape[0]
+    keep_prob = 1 - p
+
+    # generate binary_tensor mask according to probability (p for 0, 1-p for 1)
+    random_tensor = keep_prob
+    random_tensor += torch.rand([batch_size, 1, 1], dtype=inputs.dtype, device=inputs.device)
+    binary_tensor = torch.floor(random_tensor)
+
+    output = inputs / keep_prob * binary_tensor
+    return output
 
 
 class OnsetDataset(Dataset):
@@ -138,12 +168,12 @@ class ResnetBlock(nn.Module):
                                out_channels=c_out,
                                kernel_size=3,
                                padding=1,
-                               bias=True)
+                               bias=False)
 
         self.stride = stride
         self.project = project
 
-    def forward(self, x):
+    def forward(self, x, p: float = None):
         x_skip = x
 
         x = self.norm1(x)
@@ -157,6 +187,9 @@ class ResnetBlock(nn.Module):
 
         if self.stride == 2 or self.project:
             return x
+
+        if p:
+            x = drop_connect(x, p=p, training=self.training)
 
         return x + x_skip
 
@@ -179,7 +212,7 @@ class OnsetModule(pl.LightningModule):
                                    out_channels=c_in,
                                    kernel_size=9,
                                    padding=4,
-                                   bias=True)
+                                   bias=False)
 
         for cfg in CFG:
 
@@ -190,7 +223,7 @@ class OnsetModule(pl.LightningModule):
                                 project=cfg['project'])
             self.blocks.append(block)
 
-            for i in range(1, cfg['repeat'] - 1):
+            for i in range(1, cfg['repeat']):
                 block = ResnetBlock(c_in=cfg['dim'],
                                     c_out=cfg['dim'],
                                     expand=cfg['expand'])
@@ -224,13 +257,23 @@ class OnsetModule(pl.LightningModule):
         sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         if self.training:
             # Add random noise to normalization statistics
-            mu = mu * (1. + 2 * (torch.rand(1, device=x.device) - 0.5) / 5)
-            sd = sd * (1. + 2 * (torch.rand(1, device=x.device) - 0.5) / 5)
-        x = (x - mu) / sd
+            if np.random.random() > 0.5:
+                mu *= torch.rand(1, device=x.device) + 1.
+            else:
+                mu /= torch.rand(1, device=x.device) + 1.
 
+            if np.random.random() > 0.5:
+                sd *= torch.rand(1, device=x.device) + 1.
+            else:
+                sd /= torch.rand(1, device=x.device) + 1.
+
+        x = (x - mu) / sd
         x = self.conv_stem(x)
+
+        depth = 1 + len(self.blocks)
+
         for idx, block in enumerate(self.blocks):
-            x = block(x)
+            x = block(x, p=STOCHASTIC_DEPTH*(idx+1)/depth)
 
         x = self.norm_head(x)
         x = self.relu_head(x)
@@ -251,15 +294,6 @@ class OnsetModule(pl.LightningModule):
         self.log('momentum', self.optimizers().param_groups[0]['momentum'])
 
         return {'loss': loss}
-
-    def on_after_backward(self):
-        global_step = self.global_step
-        if self.global_step % 250 == 0:
-            for name, param in self.named_parameters():
-                if param.requires_grad:
-                    if 'conv' in name or 'fc' in name:
-                        self.logger.experiment.add_histogram(name, param, global_step)
-                        self.logger.experiment.add_histogram(f"{name}_grad", param.grad, global_step)
 
     def validation_step(self, batch, batch_nb):
         X, y_target, w = batch
@@ -292,6 +326,11 @@ class OnsetModule(pl.LightningModule):
 
         except ValueError:
             pass
+
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                if 'conv' in name or 'fc' in name:
+                    self.logger.experiment.add_histogram(name, param, self.global_step)
 
         self._test_true = []
         self._test_pred = []
