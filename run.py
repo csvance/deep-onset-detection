@@ -11,53 +11,25 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch_optimizer import Lookahead
 
-HYPER_D = 16
-HYPER_GROUPS = 4
+D = 32
+GROUPS = 4
 
-OPT_BATCH_SIZE = 16
-OPT_MOMENTUM = 0.9
-OPT_LR = 0.01
-OPT_WEIGHT_DECAY = 0.001
-STOCHASTIC_DEPTH = 0.2
+BATCH_SIZE = 16
+MOMENTUM = 0.9
+LR = 0.01
+WEIGHT_DECAY = 0.001
+
+DROPOUT = 0.5
 
 SCHED_EPOCHS = 75
 SCHED_GAMMA = 0.5
 SCHED_STEP = 15
 
 CFG = [
-    {'repeat': 3, 'dim': int(1 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
-    {'repeat': 4, 'dim': int(2 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
-    {'repeat': 6, 'dim': int(4 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
-    {'repeat': 3, 'dim': int(8 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 1, 'dim': int(1 * D), 'stride': 2, 'project': False, 'se': 4},
+    {'repeat': 1, 'dim': int(2 * D), 'stride': 2, 'project': True, 'se': 4},
+    {'repeat': 1, 'dim': int(4 * D), 'stride': 2, 'project': True, 'se': 4},
 ]
-
-
-def drop_connect(inputs, p, training):
-    """Drop connect.
-
-    Args:
-        input (tensor: BCWH): Input of this structure.
-        p (float: 0.0~1.0): Probability of drop connection.
-        training (bool): The running mode.
-
-    Returns:
-        output: Output after drop connection.
-    """
-    assert 0 <= p <= 1, 'p must be in range of [0,1]'
-
-    if not training:
-        return inputs
-
-    batch_size = inputs.shape[0]
-    keep_prob = 1 - p
-
-    # generate binary_tensor mask according to probability (p for 0, 1-p for 1)
-    random_tensor = keep_prob
-    random_tensor += torch.rand([batch_size, 1, 1], dtype=inputs.dtype, device=inputs.device)
-    binary_tensor = torch.floor(random_tensor)
-
-    output = inputs / keep_prob * binary_tensor
-    return output
 
 
 class OnsetDataset(Dataset):
@@ -146,7 +118,7 @@ class BlurPool1d(nn.Module):
 
 
 class ResnetBlock(nn.Module):
-    def __init__(self, c_in: int, c_out: int, expand: int, stride: int = 1, project: bool = False):
+    def __init__(self, c_in: int, c_out: int, stride: int = 1, project: bool = False, se: int = 1):
         super().__init__()
 
         self.norm1 = nn.BatchNorm1d(num_features=int(c_in), momentum=0.01, eps=0.001)
@@ -156,24 +128,38 @@ class ResnetBlock(nn.Module):
         else:
             self.blurpool = None
         self.conv1 = nn.Conv1d(in_channels=c_in,
-                               out_channels=int(expand * c_in),
+                               out_channels=c_in,
                                kernel_size=3,
                                padding=1,
                                bias=False)
 
-        self.norm2 = nn.BatchNorm1d(num_features=int(expand * c_in), momentum=0.01, eps=0.001)
+        self.norm2 = nn.BatchNorm1d(num_features=c_in, momentum=0.01, eps=0.001)
 
         self.relu2 = nn.ReLU()
-        self.conv2 = nn.Conv1d(in_channels=int(expand * c_in),
+        self.conv2 = nn.Conv1d(in_channels=c_in,
                                out_channels=c_out,
                                kernel_size=3,
                                padding=1,
                                bias=False)
 
+        if se > 1:
+            self.se_pool = nn.AdaptiveMaxPool1d((1,))
+            self.conv_squeeze = nn.Conv1d(c_in, int(c_in/se), kernel_size=1, bias=False)
+            self.se_relu = nn.ReLU()
+            self.conv_excite = nn.Conv1d(int(c_in/se), int(c_in), kernel_size=1, bias=False)
+            self.se_sigmoid = nn.Sigmoid()
+        else:
+            self.se_pool = None
+            self.conv_squeeze = None
+            self.conv_excite = None
+            self.se_relu = None
+            self.se_sigmoid = None
+
+        self.se = se
         self.stride = stride
         self.project = project
 
-    def forward(self, x, p: float = None):
+    def forward(self, x):
         x_skip = x
 
         x = self.norm1(x)
@@ -183,13 +169,21 @@ class ResnetBlock(nn.Module):
         x = self.conv1(x)
         x = self.norm2(x)
         x = self.relu2(x)
+        if self.se:
+            x_se = self.se_pool(x)
+            x_se = self.conv_squeeze(x_se)
+            x_se = self.se_relu(x_se)
+            x_se = self.conv_excite(x_se)
+            x_se = self.se_sigmoid(x_se)
+            x = x*x_se
+
         x = self.conv2(x)
 
-        if self.stride == 2 or self.project:
+        if self.project:
             return x
 
-        if p:
-            x = drop_connect(x, p=p, training=self.training)
+        if self.stride == 2:
+            x_skip = self.blurpool(x_skip)
 
         return x + x_skip
 
@@ -215,26 +209,25 @@ class OnsetModule(pl.LightningModule):
                                    bias=False)
 
         for cfg in CFG:
-
             block = ResnetBlock(c_in=c_in,
                                 c_out=cfg['dim'],
-                                expand=cfg['expand'],
                                 stride=cfg['stride'],
-                                project=cfg['project'])
+                                project=cfg['project'],
+                                se=cfg['se'])
             self.blocks.append(block)
 
             for i in range(1, cfg['repeat']):
                 block = ResnetBlock(c_in=cfg['dim'],
                                     c_out=cfg['dim'],
-                                    expand=cfg['expand'])
+                                    se=cfg['se'])
                 self.blocks.append(block)
 
             c_in = cfg['dim']
 
-        self.norm_head = nn.BatchNorm1d(num_features=c_in, momentum=0.01, eps=0.001)
-        self.relu_head = nn.ReLU()
+        self.norm_head1 = nn.BatchNorm1d(num_features=c_in, momentum=0.01, eps=0.001)
+        self.relu_head1 = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(DROPOUT)
         self.fc = nn.Linear(c_in, 2, bias=True)
 
     def init(self):
@@ -257,26 +250,24 @@ class OnsetModule(pl.LightningModule):
         sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         if self.training:
             # Add random noise to normalization statistics
-            if np.random.random() > 0.5:
-                mu *= torch.rand(1, device=x.device) + 1.
-            else:
-                mu /= torch.rand(1, device=x.device) + 1.
+            mu_r = torch.rand(1, device=x.device) + 1.
+            if np.random.random() <= 0.5:
+                mu_r = 1./mu_r
+            mu *= mu_r
 
-            if np.random.random() > 0.5:
-                sd *= torch.rand(1, device=x.device) + 1.
-            else:
-                sd /= torch.rand(1, device=x.device) + 1.
+            sd_r = torch.rand(1, device=x.device) + 1.
+            if np.random.random() <= 0.5:
+                sd_r = 1./sd_r
+            sd *= sd_r
 
         x = (x - mu) / sd
         x = self.conv_stem(x)
 
-        depth = 1 + len(self.blocks)
-
         for idx, block in enumerate(self.blocks):
-            x = block(x, p=STOCHASTIC_DEPTH*(idx+1)/depth)
+            x = block(x)
 
-        x = self.norm_head(x)
-        x = self.relu_head(x)
+        x = self.norm_head1(x)
+        x = self.relu_head1(x)
         x = self.pool_head(x)[:, :, 0]
         x = self.dropout(x)
         y = self.fc(x)
@@ -374,9 +365,9 @@ class OnsetModule(pl.LightningModule):
 
     def configure_optimizers(self):
         inner_optimizer = torch.optim.SGD(self.parameters(),
-                                          lr=OPT_LR,
-                                          momentum=OPT_MOMENTUM,
-                                          weight_decay=OPT_WEIGHT_DECAY)
+                                          lr=LR,
+                                          momentum=MOMENTUM,
+                                          weight_decay=WEIGHT_DECAY)
         optimizer = Lookahead(inner_optimizer)
         schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer,
                                                    step_size=SCHED_STEP,
@@ -388,15 +379,15 @@ class OnsetModule(pl.LightningModule):
         return DataLoader(OnsetDataset(self.X_train, self.y_train),
                           shuffle=True,
                           drop_last=True,
-                          batch_size=OPT_BATCH_SIZE)
+                          batch_size=BATCH_SIZE)
 
     def val_dataloader(self):
         return DataLoader(OnsetDataset(self.X_valid, self.y_valid),
-                          batch_size=OPT_BATCH_SIZE)
+                          batch_size=BATCH_SIZE)
 
     def test_dataloader(self):
         return DataLoader(OnsetDataset(self.X_test, self.y_test),
-                          batch_size=OPT_BATCH_SIZE)
+                          batch_size=BATCH_SIZE)
 
 
 @plac.annotations(seed=('Random seed', 'option', 'S', int))
