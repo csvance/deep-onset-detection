@@ -16,8 +16,9 @@ BATCH_SIZE = 16
 LR = 0.1
 MOMENTUM = 0.9
 WEIGHT_DECAY = 0.001
-EPOCHS = 75
-GAMMA = 0.5
+SCHED_EPOCHS = 50
+SCHED_GAMMA = 0.5
+SCHED_STEPSIZE = 10
 NUM_WORKERS = 0
 GROUPS = 4
 
@@ -233,8 +234,8 @@ class OnsetModule(pl.LightningModule):
         sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         if self.training:
             # Add random noise to normalization statistics
-            mu = mu * (1. + (torch.rand(1, device=x.device) - 0.5) / 2.5)
-            sd = sd * (1. + (torch.rand(1, device=x.device) - 0.5) / 2.5)
+            mu = mu * (1. + 5*(torch.rand(1, device=x.device) - 0.5) / 5)
+            sd = sd * (1. + 5*(torch.rand(1, device=x.device) - 0.5) / 5)
         x = (x - mu) / sd
 
         x = self.conv_stem(x)
@@ -354,8 +355,8 @@ class OnsetModule(pl.LightningModule):
                                momentum=MOMENTUM)
         optimizer = Lookahead(inner_optimizer)
         schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer,
-                                                   gamma=GAMMA,
-                                                   step_size=15)
+                                                   gamma=SCHED_GAMMA,
+                                                   step_size=SCHED_STEPSIZE)
 
         return [optimizer], [schedule]
 
@@ -390,7 +391,7 @@ def main():
 
     trainer = pl.Trainer(gpus=1,
                          precision=32,
-                         max_epochs=EPOCHS,
+                         max_epochs=SCHED_EPOCHS,
                          log_every_n_steps=5,
                          flush_logs_every_n_steps=1)
 
