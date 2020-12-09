@@ -16,7 +16,7 @@ HYPER_GROUPS = 4
 
 OPT_BATCH_SIZE = 16
 OPT_MOMENTUM = 0.9
-OPT_LR = 0.05
+OPT_LR = 0.1
 OPT_WEIGHT_DECAY = 0.001
 
 SCHED_EPOCHS = 50
@@ -32,10 +32,9 @@ CFG = [
 
 
 class OnsetDataset(Dataset):
-    def __init__(self, X, y, p=None, training: bool = True):
+    def __init__(self, X, y, training: bool = True):
         self.X = X
         self.y = y.astype(np.int64)
-        self.p = p
 
         self.training = training
 
@@ -56,20 +55,28 @@ class OnsetDataset(Dataset):
         X = self.X[item]
 
         if len(self.y.shape) == 2:
-            # When in test mode we have the whole sequence
-            y = 1 if len(np.where(self.y[item] == 1)[0]) > 0 else 0
-            w = self.w[y]
-        else:
-            y = self.y[item]
+            # When training we have the full y sequence
+            y_pos = len(np.where(self.y[item] == 1)[0])
+            y_neg = len(self.y[item]) - y_pos
+
+            y = 1 if y_pos else 0
             w = self.w[y]
 
             # Discount loss if either label is over 90% of the sequence
             if y:
-                prop = min(self.p[item], 1 - self.p[item])
-                if prop < 0.1:
-                    w *= 10*prop
+                pct_pos = y_pos / (y_pos + y_neg)
+                pct_neg = y_neg / (y_pos + y_neg)
+
+                pct = min(pct_pos, pct_neg)
+                if pct < 0.1:
+                    w *= 10*pct
                 # Make up for discount
                 w *= 1.1
+
+        else:
+            # When testing we only have a sequence wide label
+            y = self.y[item]
+            w = self.w[y]
 
         X = X.transpose((1, 0)).astype(np.float32)
         w = np.array([w]).astype(np.float32)
@@ -159,10 +166,10 @@ class ResnetBlock(nn.Module):
 
 
 class OnsetModule(pl.LightningModule):
-    def __init__(self, Xyp_train, Xy_test):
+    def __init__(self, Xy_train, Xy_test):
         super().__init__()
 
-        self.X_train, self.y_train, self.p_train = Xyp_train
+        self.X_train, self.y_train = Xy_train
         self.X_test, self.y_test = Xy_test
 
         self._test_pred = []
@@ -226,8 +233,8 @@ class OnsetModule(pl.LightningModule):
         sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         if self.training:
             # Add random noise to normalization statistics
-            mu = mu * (1. + 5*(torch.rand(1, device=x.device) - 0.5) / 5)
-            sd = sd * (1. + 5*(torch.rand(1, device=x.device) - 0.5) / 5)
+            mu = mu * (1. + 1*(torch.rand(1, device=x.device) - 0.5) / 5)
+            sd = sd * (1. + 1*(torch.rand(1, device=x.device) - 0.5) / 5)
         x = (x - mu) / sd
 
         x = self.conv_stem(x)
@@ -353,7 +360,7 @@ class OnsetModule(pl.LightningModule):
         return [optimizer], [schedule]
 
     def train_dataloader(self):
-        return DataLoader(OnsetDataset(self.X_train, self.y_train, self.p_train),
+        return DataLoader(OnsetDataset(self.X_train, self.y_train),
                           shuffle=True,
                           drop_last=True,
                           batch_size=OPT_BATCH_SIZE)
@@ -372,12 +379,11 @@ def main():
 
     X_train = Xy[:, :, 1:11]
     y_train = Xy[:, :, 0]
-    p_train = np.load('data/train_props.npy')
 
     X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
     y_test = np.load('data/test_labels.p', mmap_mode='r')
 
-    model = OnsetModule((X_train, y_train, p_train),
+    model = OnsetModule((X_train, y_train),
                         (X_test, y_test))
     model.init()
 
