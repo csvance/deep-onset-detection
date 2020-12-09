@@ -12,11 +12,14 @@ from torch.utils.data import Dataset, DataLoader
 from torch_optimizer import Lookahead
 
 D = 32
-GROUPS = 4
+SE = 4
+
+BN_EPS = 0.001
+BN_MOM = 0.01
 
 BATCH_SIZE = 16
 MOMENTUM = 0.9
-LR = 0.01
+LR = 0.0001
 WEIGHT_DECAY = 0.001
 
 DROPOUT = 0.5
@@ -26,9 +29,9 @@ SCHED_GAMMA = 0.5
 SCHED_STEP = 15
 
 CFG = [
-    {'repeat': 1, 'dim': int(1 * D), 'stride': 2, 'project': False, 'se': 4},
-    {'repeat': 1, 'dim': int(2 * D), 'stride': 2, 'project': True, 'se': 4},
-    {'repeat': 1, 'dim': int(4 * D), 'stride': 2, 'project': True, 'se': 4},
+    {'repeat': 1, 'dim': int(1 * D), 'stride': 2, 'project': False, 'se': SE},
+    {'repeat': 1, 'dim': int(2 * D), 'stride': 2, 'project': True, 'se': SE},
+    {'repeat': 1, 'dim': int(4 * D), 'stride': 2, 'project': True, 'se': SE},
 ]
 
 
@@ -121,7 +124,7 @@ class ResnetBlock(nn.Module):
     def __init__(self, c_in: int, c_out: int, stride: int = 1, project: bool = False, se: int = 1):
         super().__init__()
 
-        self.norm1 = nn.BatchNorm1d(num_features=int(c_in), momentum=0.01, eps=0.001)
+        self.norm1 = nn.BatchNorm1d(num_features=int(c_in), momentum=BN_MOM, eps=BN_EPS)
         self.relu1 = nn.ReLU()
         if stride == 2:
             self.blurpool = BlurPool1d(int(c_in))
@@ -133,8 +136,7 @@ class ResnetBlock(nn.Module):
                                padding=1,
                                bias=False)
 
-        self.norm2 = nn.BatchNorm1d(num_features=c_in, momentum=0.01, eps=0.001)
-
+        self.norm2 = nn.BatchNorm1d(num_features=c_in, momentum=BN_MOM, eps=BN_EPS)
         self.relu2 = nn.ReLU()
         self.conv2 = nn.Conv1d(in_channels=c_in,
                                out_channels=c_out,
@@ -224,7 +226,7 @@ class OnsetModule(pl.LightningModule):
 
             c_in = cfg['dim']
 
-        self.norm_head1 = nn.BatchNorm1d(num_features=c_in, momentum=0.01, eps=0.001)
+        self.norm_head1 = nn.BatchNorm1d(num_features=c_in, momentum=BN_MOM, eps=BN_EPS)
         self.relu_head1 = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
         self.dropout = nn.Dropout(DROPOUT)
@@ -369,7 +371,7 @@ class OnsetModule(pl.LightningModule):
                                           momentum=MOMENTUM,
                                           weight_decay=WEIGHT_DECAY)
         optimizer = Lookahead(inner_optimizer)
-        schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer,
+        schedule = torch.optim.lr_scheduler.StepLR(optimizer=optimizer,
                                                    step_size=SCHED_STEP,
                                                    gamma=SCHED_GAMMA)
 
