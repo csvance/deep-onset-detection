@@ -375,8 +375,10 @@ class OnsetModule(pl.LightningModule):
                           batch_size=OPT_BATCH_SIZE)
 
 
-@plac.annotations()
-def main():
+@plac.annotations(seed=('Random seed', 'option', 'S', int))
+def main(seed: int = 0):
+    pl.seed_everything(seed)
+
     Xy_train = np.load('data/train.npy', mmap_mode='r')
 
     X_train = Xy_train[:, :, 1:11]
@@ -395,14 +397,19 @@ def main():
                         (X_test, y_test))
     model.init()
 
+    cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
+                                                 monitor='val_auc',
+                                                 mode='min',
+                                                 verbose=True)
     trainer = pl.Trainer(gpus=1,
                          precision=32,
                          max_epochs=SCHED_EPOCHS,
                          log_every_n_steps=5,
-                         flush_logs_every_n_steps=1)
+                         flush_logs_every_n_steps=1,
+                         callbacks=[cb_checkpoint],
+                         deterministic=True)
     trainer.fit(model)
-    trainer.save_checkpoint('checkpoint/final.ckpt')
-    trainer.test(model)
+    trainer.test(ckpt_path=cb_checkpoint.best_model_path)
 
 
 if __name__ == '__main__':
