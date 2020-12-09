@@ -399,7 +399,7 @@ def main(seed: int = 0):
 
     cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
                                                  monitor='val_auc',
-                                                 mode='min',
+                                                 mode='max',
                                                  verbose=True)
     trainer = pl.Trainer(gpus=1,
                          precision=32,
