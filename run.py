@@ -20,8 +20,9 @@ OPT_MOMENTUM = 0.9
 OPT_LR = 0.1
 OPT_WEIGHT_DECAY = 0.001
 
-SCHED_EPOCHS = 70
-SCHED_GAMMA = 0.9
+SCHED_EPOCHS = 75
+SCHED_GAMMA = 0.5
+SCHED_STEP = 15
 
 CFG = [
     {'repeat': 3, 'dim': int(1 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
@@ -353,8 +354,9 @@ class OnsetModule(pl.LightningModule):
                                lr=OPT_LR,
                                momentum=OPT_MOMENTUM)
         optimizer = Lookahead(inner_optimizer)
-        schedule = torch.optim.lr_scheduler.ExponentialLR(optimizer=inner_optimizer,
-                                                          gamma=SCHED_GAMMA)
+        schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer,
+                                                   step_size=SCHED_STEP,
+                                                   gamma=SCHED_GAMMA)
 
         return [optimizer], [schedule]
 
@@ -374,7 +376,7 @@ class OnsetModule(pl.LightningModule):
 
 
 @plac.annotations(seed=('Random seed', 'option', 'S', int))
-def main(seed: int = 1337):
+def main(seed: int = 0):
     pl.seed_everything(seed)
 
     Xy_train = np.load('data/train.npy', mmap_mode='r')
