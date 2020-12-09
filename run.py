@@ -20,9 +20,9 @@ OPT_MOMENTUM = 0.9
 OPT_LR = 0.1
 OPT_WEIGHT_DECAY = 0.001
 
-SCHED_EPOCHS = 50
+SCHED_EPOCHS = 70
 SCHED_GAMMA = 0.5
-SCHED_STEPSIZE = 5
+SCHED_STEPSIZE = 10
 
 CFG = [
     {'repeat': 3, 'dim': int(1 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
@@ -320,7 +320,7 @@ class OnsetModule(pl.LightningModule):
                                   y_pred=np.round(self._test_pred).astype(np.int),
                                   normalize='true')
             ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
-            ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
+            ax.set_title('Confusion Matrix - Test')
             plt.show()
         except ValueError:
             pass
@@ -397,7 +397,7 @@ def main():
 
     trainer = pl.Trainer(gpus=1,
                          precision=32,
-                         max_epochs=3,
+                         max_epochs=SCHED_EPOCHS,
                          log_every_n_steps=5,
                          flush_logs_every_n_steps=1)
     trainer.fit(model)
