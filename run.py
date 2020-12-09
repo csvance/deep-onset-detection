@@ -10,6 +10,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch_optimizer import Lookahead, SGDW
+from torch.nn.utils import weight_norm
 
 HYPER_D = 32
 HYPER_GROUPS = 4
@@ -23,7 +24,6 @@ SCHED_EPOCHS = 50
 SCHED_GAMMA = 0.5
 SCHED_STEPSIZE = 5
 
-
 CFG = [
     {'repeat': 3, 'dim': int(1 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
     {'repeat': 4, 'dim': int(2 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
@@ -32,14 +32,12 @@ CFG = [
 
 
 class OnsetDataset(Dataset):
-    def __init__(self, X, y, training: bool = True):
+    def __init__(self, X, y):
         self.X = X
         self.y = y.astype(np.int64)
 
-        self.training = training
-
         if len(self.y.shape) == 2:
-            self.w = compute_class_weight(y=[1 if len(np.where(yi)[0]) > 0 else 0 for yi in self.y],
+            self.w = compute_class_weight(y=np.max(self.y, axis=-1),
                                           class_weight="balanced",
                                           classes=[0, 1])
         else:
@@ -55,7 +53,6 @@ class OnsetDataset(Dataset):
         X = self.X[item]
 
         if len(self.y.shape) == 2:
-            # When training we have the full y sequence
             y_pos = len(np.where(self.y[item] == 1)[0])
             y_neg = len(self.y[item]) - y_pos
 
@@ -69,10 +66,9 @@ class OnsetDataset(Dataset):
 
                 pct = min(pct_pos, pct_neg)
                 if pct < 0.1:
-                    w *= 10*pct
+                    w *= 10 * pct
                 # Make up for discount
                 w *= 1.1
-
         else:
             # When testing we only have a sequence wide label
             y = self.y[item]
@@ -166,10 +162,11 @@ class ResnetBlock(nn.Module):
 
 
 class OnsetModule(pl.LightningModule):
-    def __init__(self, Xy_train, Xy_test):
+    def __init__(self, Xy_train, Xy_valid, Xy_test):
         super().__init__()
 
         self.X_train, self.y_train = Xy_train
+        self.X_valid, self.y_valid = Xy_valid
         self.X_test, self.y_test = Xy_test
 
         self._test_pred = []
@@ -203,12 +200,13 @@ class OnsetModule(pl.LightningModule):
 
         self.norm_head = nn.GroupNorm(num_groups=HYPER_GROUPS, num_channels=c_in)
         self.relu_head = nn.ReLU()
-        self.conv_head = nn.Conv1d(in_channels=c_in,
-                                   out_channels=int(4*c_in),
-                                   kernel_size=1,
-                                   groups=c_in,
-                                   bias=False)
-        c_in = int(4*c_in)
+        self.conv_head = weight_norm(nn.Conv1d(in_channels=c_in,
+                                               out_channels=int(4 * c_in),
+                                               kernel_size=1,
+                                               groups=c_in,
+                                               bias=False),
+                                     name='weight')
+        c_in = int(4 * c_in)
 
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
         self.fc = nn.Linear(c_in, 2, bias=True)
@@ -233,8 +231,8 @@ class OnsetModule(pl.LightningModule):
         sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
         if self.training:
             # Add random noise to normalization statistics
-            mu = mu * (1. + 1*(torch.rand(1, device=x.device) - 0.5) / 5)
-            sd = sd * (1. + 1*(torch.rand(1, device=x.device) - 0.5) / 5)
+            mu = mu * (1. + 2 * (torch.rand(1, device=x.device) - 0.5) / 5)
+            sd = sd * (1. + 2 * (torch.rand(1, device=x.device) - 0.5) / 5)
         x = (x - mu) / sd
 
         x = self.conv_stem(x)
@@ -305,7 +303,7 @@ class OnsetModule(pl.LightningModule):
         self._test_pred.append(F.softmax(y.detach(), dim=-1)[:, 1].cpu().numpy())
         self._test_true.append(y_target.detach().cpu().numpy())
 
-        return {'test_loss': loss}
+        return {'test_loss': loss, }
 
     def test_epoch_end(self, outputs):
         avg_loss = torch.stack([x['test_loss'] for x in outputs]).mean()
@@ -315,14 +313,17 @@ class OnsetModule(pl.LightningModule):
         self._test_pred = np.concatenate(self._test_pred, axis=0)
         self._test_true = np.concatenate(self._test_true, axis=0)
 
-        self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
+        try:
+            self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
 
-        cm = confusion_matrix(y_true=self._test_true.astype(np.int),
-                              y_pred=np.round(self._test_pred).astype(np.int),
-                              normalize='true')
-        ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
-        ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
-        plt.show()
+            cm = confusion_matrix(y_true=self._test_true.astype(np.int),
+                                  y_pred=np.round(self._test_pred).astype(np.int),
+                                  normalize='true')
+            ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
+            ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
+            plt.show()
+        except ValueError:
+            pass
 
         self._test_true = []
         self._test_pred = []
@@ -366,35 +367,42 @@ class OnsetModule(pl.LightningModule):
                           batch_size=OPT_BATCH_SIZE)
 
     def val_dataloader(self):
-        return DataLoader(OnsetDataset(self.X_test, self.y_test, training=False),
+        return DataLoader(OnsetDataset(self.X_valid, self.y_valid),
                           batch_size=OPT_BATCH_SIZE)
 
     def test_dataloader(self):
-        return self.val_dataloader()
+        return DataLoader(OnsetDataset(self.X_test, self.y_test),
+                          batch_size=OPT_BATCH_SIZE)
 
 
 @plac.annotations()
 def main():
-    Xy = np.load('data/train.npy', mmap_mode='r')
+    Xy_train = np.load('data/train.npy', mmap_mode='r')
 
-    X_train = Xy[:, :, 1:11]
-    y_train = Xy[:, :, 0]
+    X_train = Xy_train[:, :, 1:11]
+    y_train = Xy_train[:, :, 0]
+
+    Xy_valid = np.load('data/val.npy', mmap_mode='r')
+
+    X_valid = Xy_valid[:, :, 1:11]
+    y_valid = np.max(Xy_valid[:, :, 0], axis=-1)
 
     X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
     y_test = np.load('data/test_labels.p', mmap_mode='r')
 
     model = OnsetModule((X_train, y_train),
+                        (X_valid, y_valid),
                         (X_test, y_test))
     model.init()
 
     trainer = pl.Trainer(gpus=1,
                          precision=32,
-                         max_epochs=SCHED_EPOCHS,
+                         max_epochs=3,
                          log_every_n_steps=5,
                          flush_logs_every_n_steps=1)
-
     trainer.fit(model)
-    trainer.test()
+    trainer.save_checkpoint('checkpoint/final.ckpt')
+    trainer.test(model)
 
 
 if __name__ == '__main__':
