@@ -11,21 +11,23 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch_optimizer import Lookahead, SGDW
 
-D = 32
-BATCH_SIZE = 16
-LR = 0.1
-MOMENTUM = 0.9
-WEIGHT_DECAY = 0.001
+HYPER_D = 32
+HYPER_GROUPS = 4
+
+OPT_BATCH_SIZE = 16
+OPT_MOMENTUM = 0.9
+OPT_LR = 0.1
+OPT_WEIGHT_DECAY = 0.001
+
 SCHED_EPOCHS = 50
 SCHED_GAMMA = 0.5
 SCHED_STEPSIZE = 10
-NUM_WORKERS = 0
-GROUPS = 4
+
 
 CFG = [
-    {'repeat': 3, 'dim': int(1 * D), 'expand': 1, 'stride': 2, 'project': True},
-    {'repeat': 4, 'dim': int(2 * D), 'expand': 1, 'stride': 2, 'project': True},
-    {'repeat': 2, 'dim': int(4 * D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 3, 'dim': int(1 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 4, 'dim': int(2 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
+    {'repeat': 2, 'dim': int(4 * HYPER_D), 'expand': 1, 'stride': 2, 'project': True},
 ]
 
 
@@ -125,7 +127,7 @@ class ResnetBlock(nn.Module):
     def __init__(self, c_in: int, c_out: int, expand: int, stride: int = 1, project: bool = False):
         super().__init__()
 
-        self.norm1 = nn.GroupNorm(num_groups=GROUPS, num_channels=c_in)
+        self.norm1 = nn.GroupNorm(num_groups=HYPER_GROUPS, num_channels=c_in)
         self.relu1 = nn.ReLU()
         if stride == 2:
             self.blurpool = BlurPool1d(int(c_in))
@@ -137,7 +139,7 @@ class ResnetBlock(nn.Module):
                                padding=1,
                                bias=False)
 
-        self.norm2 = nn.GroupNorm(num_groups=GROUPS, num_channels=int(expand * c_in))
+        self.norm2 = nn.GroupNorm(num_groups=HYPER_GROUPS, num_channels=int(expand * c_in))
         self.relu2 = nn.ReLU()
         self.conv2 = nn.Conv1d(in_channels=int(expand * c_in),
                                out_channels=c_out,
@@ -202,7 +204,7 @@ class OnsetModule(pl.LightningModule):
 
             c_in = cfg['dim']
 
-        self.norm_head = nn.GroupNorm(num_groups=GROUPS, num_channels=c_in)
+        self.norm_head = nn.GroupNorm(num_groups=HYPER_GROUPS, num_channels=c_in)
         self.relu_head = nn.ReLU()
         self.conv_head = nn.Conv1d(in_channels=c_in,
                                    out_channels=int(4*c_in),
@@ -346,13 +348,13 @@ class OnsetModule(pl.LightningModule):
                 elif isinstance(m, nn.Linear):
                     params_nowd.append(param)
         params = [
-            {'params': params_wd, 'weight_decay': WEIGHT_DECAY},
+            {'params': params_wd, 'weight_decay': OPT_WEIGHT_DECAY},
             {'params': params_nowd, 'weight_decay': 0.}
         ]
 
         inner_optimizer = SGDW(params,
-                               lr=LR,
-                               momentum=MOMENTUM)
+                               lr=OPT_LR,
+                               momentum=OPT_MOMENTUM)
         optimizer = Lookahead(inner_optimizer)
         schedule = torch.optim.lr_scheduler.StepLR(optimizer=inner_optimizer,
                                                    gamma=SCHED_GAMMA,
@@ -364,13 +366,11 @@ class OnsetModule(pl.LightningModule):
         return DataLoader(OnsetDataset(self.X_train, self.y_train),
                           shuffle=True,
                           drop_last=True,
-                          batch_size=BATCH_SIZE,
-                          num_workers=NUM_WORKERS)
+                          batch_size=OPT_BATCH_SIZE)
 
     def val_dataloader(self):
         return DataLoader(OnsetDataset(self.X_test, self.y_test, training=False),
-                          batch_size=BATCH_SIZE,
-                          num_workers=NUM_WORKERS)
+                          batch_size=OPT_BATCH_SIZE)
 
     def test_dataloader(self):
         return self.val_dataloader()
