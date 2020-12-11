@@ -471,10 +471,12 @@ def main(seed: int = 0,
          k: int = 10):
 
     pyX = np.load('data/pyX.npy', mmap_mode='r')
-    folds = np.array_split(np.unique(pyX[:, 0, 0]), k)
+    X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
+    y_test = np.load('data/test_labels.p', mmap_mode='r')
 
+    folds = np.array_split(np.unique(pyX[:, 0, 0]), k)
     for ki in range(0, k):
-        pl.seed_everything(k)
+        pl.seed_everything(seed)
 
         pids_train = []
         for n in range(ki, ki+k-1):
@@ -503,6 +505,7 @@ def main(seed: int = 0,
 
         model = OnsetModule((X_train, y_train),
                             (X_valid, y_valid),
+                            (X_test, y_test),
                             d=d,
                             epochs=epochs,
                             lr=lr,
@@ -510,11 +513,11 @@ def main(seed: int = 0,
                             se=se,
                             rho=rho,
                             seed=seed)
-
         model.init()
-        logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=True)
+
+        logger = TensorBoardLogger('lightning_logs', name='%d_folds' % k, default_hp_metric=True)
         cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                     filename='seed_%d' % seed,
+                                                     filename='fold_%d' % ki,
                                                      monitor='val_auc',
                                                      mode='max',
                                                      verbose=True)
@@ -530,16 +533,15 @@ def main(seed: int = 0,
                              logger=logger)
 
         trainer.fit(model)
-        logger.log_hyperparams(model.hparams, {'hp_metric': cb_checkpoint.best_model_score})
+        results = trainer.test(ckpt_path=cb_checkpoint.best_model_path)
+        logger.log_hyperparams(model.hparams, {'val_auc': cb_checkpoint.best_model_score,
+                                               'test_auc': results[0]['test_auc']})
 
-    """
-    X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
-    y_test = np.load('data/test_labels.p', mmap_mode='r')
 
-    results = trainer.test(ckpt_path=cb_checkpoint.best_model_path)
-    logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
-    logger.close()
-    """
+
+
+
+
 
 
 if __name__ == '__main__':
