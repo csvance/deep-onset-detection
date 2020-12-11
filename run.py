@@ -426,7 +426,7 @@ class OnsetModule(pl.LightningModule):
                                             max_lr=self._lr,
                                             epochs=self._epochs,
                                             steps_per_epoch=int(
-                                                len(self.X_train) / BATCH_SIZE),
+                                                len(self.Xy_train[0]) / BATCH_SIZE),
                                             verbose=False),
                     'name': 'learning_rate',
                     'interval': 'step',
