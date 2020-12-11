@@ -442,16 +442,12 @@ class OnsetModule(pl.LightningModule):
                           batch_size=BATCH_SIZE)
 
     def val_dataloader(self):
-        if self.X_valid is not None:
-            return DataLoader(OnsetDataset(self.Xy_valid[0], self.Xy_valid[1], training=False),
-                              batch_size=BATCH_SIZE)
-        return None
+        return DataLoader(OnsetDataset(self.Xy_valid[0], self.Xy_valid[1], training=False),
+                          batch_size=BATCH_SIZE) if self.Xy_valid is not None else None
 
     def test_dataloader(self):
-        if self.X_test is not None:
-            return DataLoader(OnsetDataset(self.Xy_test[0], self.Xy_test[1], training=False),
-                              batch_size=BATCH_SIZE)
-        return None
+        return DataLoader(OnsetDataset(self.Xy_test[0], self.Xy_test[1], training=False),
+                          batch_size=BATCH_SIZE) if self.Xy_test is not None else None
 
 
 @plac.annotations(
