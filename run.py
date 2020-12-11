@@ -283,8 +283,8 @@ class OnsetModule(pl.LightningModule):
             mu = torch.mean(x)
             sd = torch.std(x)
         else:
-            mu = 27.7861055245733155
-            sd = 483.8070229306061947
+            mu = 19.2833522369622834
+            sd = 530.5211141225101983
         x = (x - mu) / sd
 
         x = self.conv_stem(x)
@@ -453,70 +453,93 @@ class OnsetModule(pl.LightningModule):
                           batch_size=BATCH_SIZE)
 
     def val_dataloader(self):
-        return DataLoader(OnsetDataset(self.X_valid, self.y_valid),
-                          batch_size=BATCH_SIZE)
+        if self.X_valid is not None:
+            return DataLoader(OnsetDataset(self.X_valid, self.y_valid),
+                              batch_size=BATCH_SIZE)
+        return None
 
     def test_dataloader(self):
-        return DataLoader(OnsetDataset(self.X_test, self.y_test),
-                          batch_size=BATCH_SIZE)
+        if self.X_test is not None:
+            return DataLoader(OnsetDataset(self.X_test, self.y_test),
+                              batch_size=BATCH_SIZE)
+        return None
 
 
-@plac.annotations(seed=('Random seed', 'option', 'S', int))
-def main(seed: int = 0):
-    Xy_train = np.load('data/train.npy', mmap_mode='r')
+@plac.annotations(seed=('Random seed', 'option', 'S', int),
+                  k=('k-folds', 'option', 'k', int))
+def main(seed: int = 0,
+         k: int = 10):
 
-    X_train = Xy_train[:, :, 1:11]
-    y_train = Xy_train[:, :, 0]
+    pyX = np.load('data/pyX.npy', mmap_mode='r')
+    folds = np.array_split(np.unique(pyX[:, 0, 0]), k)
 
-    Xy_valid = np.load('data/val.npy', mmap_mode='r')
+    for ki in range(0, k):
+        pl.seed_everything(k)
 
-    X_valid = Xy_valid[:, :, 1:11]
-    y_valid = np.max(Xy_valid[:, :, 0], axis=-1)
+        pids_train = []
+        for n in range(ki, ki+k-1):
+            n = n % k
+            pids_train.extend(folds[n])
+        pids_valid = []
+        for n in range(ki+k-1, ki+k):
+            n = n % k
+            pids_valid.extend(folds[n])
 
+        idx_train = np.isin(pyX[:, 0, 0], pids_train)
+        idx_valid = np.isin(pyX[:, 0, 0], pids_valid)
+
+        X_train = pyX[idx_train, :, 2:]
+        y_train = pyX[idx_train, :, 1]
+
+        X_valid = pyX[idx_valid, :, 2:]
+        y_valid = pyX[idx_valid, :, 1]
+
+        d = D
+        dropout = DROPOUT
+        lr = LR
+        se = SE
+        epochs = EPOCHS
+        rho = RHO
+
+        model = OnsetModule((X_train, y_train),
+                            (X_valid, y_valid),
+                            d=d,
+                            epochs=epochs,
+                            lr=lr,
+                            dropout=dropout,
+                            se=se,
+                            rho=rho,
+                            seed=seed)
+
+        model.init()
+        logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=True)
+        cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
+                                                     filename='seed_%d' % seed,
+                                                     monitor='val_auc',
+                                                     mode='max',
+                                                     verbose=True)
+
+        trainer = pl.Trainer(gpus=1,
+                             precision=32,
+                             max_epochs=epochs,
+                             log_every_n_steps=5,
+                             flush_logs_every_n_steps=5,
+                             callbacks=[cb_checkpoint],
+                             deterministic=True,
+                             val_check_interval=0.1,
+                             logger=logger)
+
+        trainer.fit(model)
+        logger.log_hyperparams(model.hparams, {'hp_metric': cb_checkpoint.best_model_score})
+
+    """
     X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
     y_test = np.load('data/test_labels.p', mmap_mode='r')
 
-    pl.seed_everything(seed)
-    d = D
-    dropout = DROPOUT
-    lr = LR
-    se = SE
-    epochs = EPOCHS
-    rho = RHO
-
-    model = OnsetModule((X_train, y_train),
-                        (X_valid, y_valid),
-                        (X_test, y_test),
-                        d=d,
-                        epochs=epochs,
-                        lr=lr,
-                        dropout=dropout,
-                        se=se,
-                        rho=rho,
-                        seed=seed)
-
-    model.init()
-    logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=True)
-    cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                 filename='seed_%d' % seed,
-                                                 monitor='val_auc',
-                                                 mode='max',
-                                                 verbose=True)
-
-    trainer = pl.Trainer(gpus=1,
-                         precision=32,
-                         max_epochs=epochs,
-                         log_every_n_steps=5,
-                         flush_logs_every_n_steps=5,
-                         callbacks=[cb_checkpoint],
-                         deterministic=True,
-                         val_check_interval=0.1,
-                         logger=logger)
-
-    trainer.fit(model)
     results = trainer.test(ckpt_path=cb_checkpoint.best_model_path)
     logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
     logger.close()
+    """
 
 
 if __name__ == '__main__':
