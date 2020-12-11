@@ -208,20 +208,9 @@ class OnsetModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters('d', 'epochs', 'lr', 'l2', 'rho', 'weight_decay', 'dropout', 'se', 'seed')
 
-        if Xy_train is not None:
-            self.X_train, self.y_train = Xy_train
-        else:
-            self.X_train, self.y_train = None, None
-
-        if Xy_valid is not None:
-            self.X_valid, self.y_valid = Xy_valid
-        else:
-            self.X_valid, self.y_valid = None, None
-
-        if Xy_test is not None:
-            self.X_test, self.y_test = Xy_test
-        else:
-            self.X_test, self.y_test = None, None
+        self.Xy_train = Xy_train
+        self.Xy_valid = Xy_valid
+        self.Xy_test = Xy_test
 
         self._test_pred = []
         self._test_true = []
@@ -447,20 +436,20 @@ class OnsetModule(pl.LightningModule):
         return [optimizer], [schedule]
 
     def train_dataloader(self):
-        return DataLoader(OnsetDataset(self.X_train, self.y_train, training=True),
+        return DataLoader(OnsetDataset(self.Xy_train[0], self.Xy_train[1], training=True),
                           shuffle=True,
                           drop_last=True,
                           batch_size=BATCH_SIZE)
 
     def val_dataloader(self):
         if self.X_valid is not None:
-            return DataLoader(OnsetDataset(self.X_valid, self.y_valid, training=False),
+            return DataLoader(OnsetDataset(self.Xy_valid[0], self.Xy_valid[1], training=False),
                               batch_size=BATCH_SIZE)
         return None
 
     def test_dataloader(self):
         if self.X_test is not None:
-            return DataLoader(OnsetDataset(self.X_test, self.y_test, training=False),
+            return DataLoader(OnsetDataset(self.Xy_test[0], self.Xy_test[1], training=False),
                               batch_size=BATCH_SIZE)
         return None
 
