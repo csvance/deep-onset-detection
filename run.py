@@ -13,7 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 from sam import SAM
 
-PLOT = False
+PLOT = True
 HISTO = True
 
 D = 32
@@ -300,9 +300,9 @@ class OnsetModule(pl.LightningModule):
     def training_step(self, batch, batch_nb):
         X, y_target, w = batch
 
-        def _step():
+        def forward_loss_backward():
             y = self.forward(X)
-            loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
+            step_loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
             if self._l2 > 0.:
                 l2 = None
                 for p in self.parameters():
@@ -311,21 +311,21 @@ class OnsetModule(pl.LightningModule):
                             l2 = self._l2*torch.sum(torch.square(p))
                         else:
                             l2 += self._l2*torch.sum(torch.square(p))
-                loss = loss + l2
-            loss.backward()
-            return loss
+                step_loss = step_loss + l2
+            step_loss.backward()
+            return step_loss
 
-        sam = self.optimizers()
-        loss_metric = _step()
-        sam.first_step(zero_grad=True)
-        _step()
-        sam.second_step(zero_grad=True)
+        loss = forward_loss_backward()
+        opt: SAM = self.optimizers()
+        opt.first_step(zero_grad=True)
+        forward_loss_backward()
+        opt.second_step(zero_grad=True)
 
-        self.log('train_loss', loss_metric, prog_bar=False, logger=True)
+        self.log('train_loss', loss, prog_bar=False, logger=True)
         self.log('lr', self.optimizers().param_groups[0]['lr'])
         self.log('momentum', self.optimizers().param_groups[0]['momentum'])
 
-        return {'loss': loss_metric}
+        return {'loss': loss}
 
     def optimizer_step(
         self,
@@ -430,6 +430,7 @@ class OnsetModule(pl.LightningModule):
         optimizer = SAM(self.parameters(), base_optimizer=torch.optim.SGD, rho=self._rho,
                         lr=self._lr, weight_decay=self._weight_decay)
         inner_optimizer = optimizer.base_optimizer
+
         schedule = {'scheduler': OneCycleLR(inner_optimizer,
                                             max_lr=self._lr,
                                             epochs=self._epochs,
@@ -479,6 +480,7 @@ def main(seed: int = 0):
     lr = LR
     se = SE
     epochs = EPOCHS
+    rho = RHO
 
     model = OnsetModule((X_train, y_train),
                         (X_valid, y_valid),
@@ -487,7 +489,8 @@ def main(seed: int = 0):
                         epochs=epochs,
                         lr=lr,
                         dropout=dropout,
-                        se=se)
+                        se=se,
+                        rho=rho)
 
     model.init()
     logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=True)
@@ -510,6 +513,7 @@ def main(seed: int = 0):
     trainer.fit(model)
     results = trainer.test(ckpt_path=cb_checkpoint.best_model_path)
     logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
+    logger.close()
 
 
 if __name__ == '__main__':
