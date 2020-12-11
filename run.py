@@ -2,11 +2,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import plac
 import pytorch_lightning as pl
-import seaborn as sns
 import torch
 from pytorch_lightning.loggers import TensorBoardLogger
 import torch.nn.functional as F
-from sklearn.metrics import roc_auc_score, confusion_matrix
+from sklearn.metrics import roc_auc_score
 from sklearn.utils.class_weight import compute_class_weight
 import scikitplot as skplt
 
@@ -24,7 +23,7 @@ SE = 4
 BN_EPS = 0.001
 BN_MOM = 0.01
 
-EPOCHS = 2
+EPOCHS = 3
 BATCH_SIZE = 16
 LR = 0.05
 
@@ -64,22 +63,26 @@ class OnsetDataset(Dataset):
             w = self.w[y]
 
             if self.training:
-                # Discount loss if either label is over 90% of the sequence
-                if y:
-                    pct_pos = y_pos / (y_pos + y_neg)
-                    pct_neg = y_neg / (y_pos + y_neg)
+                pct_pos = y_pos / (y_pos + y_neg)
+                pct_neg = y_neg / (y_pos + y_neg)
 
-                    pct = min(pct_pos, pct_neg)
-                    if pct < 0.1:
-                        w *= 10 * pct
-                    # Make up for discount
-                    w *= 1.1
+                y = np.array([pct_neg, pct_pos], dtype=np.float32)
+            else:
+                if y:
+                    y = np.array([0., 1.], dtype=np.float32)
+                else:
+                    y = np.array([1., 0.], dtype=np.float32)
         else:
             assert not self.training
 
             # When testing we only have a sequence wide label
             y = self.y[item]
             w = self.w[y]
+
+            if y:
+                y = np.array([0., 1.], dtype=np.float32)
+            else:
+                y = np.array([1., 0.], dtype=np.float32)
 
         X = X.transpose((1, 0)).astype(np.float32)
         w = np.array([w]).astype(np.float32)
@@ -249,7 +252,7 @@ class OnsetModule(pl.LightningModule):
 
         self.norm_head = nn.BatchNorm1d(num_features=c_in, momentum=BN_MOM, eps=BN_EPS)
         self.relu_head = nn.ReLU()
-        self.pool_head = nn.AdaptiveMaxPool1d((1,))
+        self.pool_head = nn.AdaptiveAvgPool1d((1,))
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(c_in, 2, bias=True)
 
@@ -280,6 +283,7 @@ class OnsetModule(pl.LightningModule):
         else:
             mu = 19.9470197464008088
             sd = 528.4862623336450724
+
         x = (x - mu) / sd
 
         x = self.conv_stem(x)
@@ -299,7 +303,7 @@ class OnsetModule(pl.LightningModule):
 
         def forward_loss_backward():
             y = self.forward(X)
-            step_loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
+            step_loss = torch.sum(w * nn.KLDivLoss(reduction='none')(F.log_softmax(y, dim=-1), y_target)) / y.size(0)
             if self._l2 > 0.:
                 l2 = None
                 for p in self.parameters():
@@ -346,10 +350,11 @@ class OnsetModule(pl.LightningModule):
         X, y_target, w = batch
         y = self(X)
 
-        loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
+        loss = torch.sum(w * nn.KLDivLoss(reduction='none')(F.log_softmax(y, dim=-1), y_target)) / y.size(0)
+        self.log('val_loss', loss)
 
         self._test_pred.append(F.softmax(y.detach(), dim=-1)[:, 1].cpu().numpy())
-        self._test_true.append(y_target.detach().cpu().numpy())
+        self._test_true.append(np.ceil(y_target[:, 1].detach().cpu().numpy()).astype(np.int64))
 
         return {'val_loss': loss}
 
@@ -362,13 +367,13 @@ class OnsetModule(pl.LightningModule):
         self._test_true = np.concatenate(self._test_true, axis=0)
 
         try:
+            self._test_pred = np.tanh(5.49306 * self._test_pred)
             self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
             if PLOT:
                 skplt.metrics.plot_roc_curve(self._test_true,
                                              np.array([1 - self._test_pred, self._test_pred]).transpose((1, 0)),
                                              curves=(1,))
                 plt.show()
-
         except ValueError:
             pass
 
@@ -385,12 +390,13 @@ class OnsetModule(pl.LightningModule):
         X, y_target, w = batch
         y = self(X)
 
-        loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
+        loss = torch.sum(w * nn.KLDivLoss(reduction='none')(F.log_softmax(y, dim=-1), y_target)) / y.size(0)
+        self.log('test_loss', loss)
 
         self._test_pred.append(F.softmax(y.detach(), dim=-1)[:, 1].cpu().numpy())
-        self._test_true.append(y_target.detach().cpu().numpy())
+        self._test_true.append(np.ceil(y_target[:, 1].detach().cpu().numpy()).astype(np.int64))
 
-        return {'test_loss': loss, }
+        return {'test_loss': loss}
 
     def test_epoch_end(self, outputs):
         avg_loss = torch.stack([x['test_loss'] for x in outputs]).mean()
@@ -401,6 +407,8 @@ class OnsetModule(pl.LightningModule):
         self._test_true = np.concatenate(self._test_true, axis=0)
 
         try:
+            # Map 0.1 to 0.5
+            self._test_pred = np.tanh(5.49306 * self._test_pred)
             self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
             if PLOT:
                 skplt.metrics.plot_roc_curve(self._test_true,
@@ -451,17 +459,32 @@ class OnsetModule(pl.LightningModule):
 
 
 @plac.annotations(
+    test=('Run testing on a checkpoint', 'option', 'T', str),
     seed=('Random seed', 'option', 'S', int),
     k=('k-folds', 'option', 'k', int)
 )
-def main(seed: int = 0,
+def main(test: str = None,
+         seed: int = 0,
          k: int = 10):
+
+    if test is not None:
+        model = OnsetModule.load_from_checkpoint(test,
+                                                 Xy_test=(np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2),
+                                                          np.load('data/test_labels.p', mmap_mode='r')))
+        trainer = pl.Trainer(gpus=1,
+                             precision=32,
+                             deterministic=True)
+        trainer.test(model)
+        return
+
     pyX = np.load('data/pyX.npy', mmap_mode='r')
 
+    auc = []
     for ki in range(0, k):
+        pl.seed_everything(seed)
+
         if k > 1:
             folds = np.array_split(np.unique(pyX[:, 0, 0]), k)
-            pl.seed_everything(seed)
 
             pids_train = []
             for n in range(ki, ki + k - 1):
@@ -478,6 +501,7 @@ def main(seed: int = 0,
             Xy_train = (pyX[idx_train, :, 2:], pyX[idx_train, :, 1])
             Xy_valid = (pyX[idx_valid, :, 2:], pyX[idx_valid, :, 1])
             Xy_test = None
+
         else:
             Xy_train = (pyX[:, :, 2:], pyX[:, :, 1])
             Xy_valid = None
@@ -512,14 +536,19 @@ def main(seed: int = 0,
                              val_check_interval=0.1,
                              logger=logger)
         trainer.fit(model)
+        trainer.save_checkpoint('checkpoint/final.ckpt')
 
         if cb_checkpoint is not None:
             assert k != 1
             logger.log_hyperparams(model.hparams, {'hp_metric': cb_checkpoint.best_model_score})
+            auc.append(cb_checkpoint.best_model_score)
         else:
             assert k == 1
-            results = trainer.test()
+            results = trainer.test(model)
             logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
+
+    if len(auc) > 0:
+        print("%d-folds ROC-AUC: %f" % (k, np.mean(auc)))
 
 
 if __name__ == '__main__':

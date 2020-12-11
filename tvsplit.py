@@ -46,20 +46,21 @@ def main(csv_path: str = 'data/train_full_seq.csv',
                          }
 
         df_ep = df[df['PID'] == pid]
-        episode = df_ep.values
+        episode = df_ep.values.astype(np.float32)
 
         print("(%d): episode length - %s" % (pid, episode.shape[0]))
 
         for n in range(0, SAMPLES_PER_EPISODE):
 
-            start = np.random.randint(0, len(episode) - int(seqlen)/2)
+            start = np.random.randint(0, len(episode) - int(seqlen/2))
             sample = episode[start:start+seqlen]
             if len(sample) < seqlen:
                 pad = seqlen - len(sample)
                 sample = np.pad(sample, ((0, pad), (0, 0)))
+                sample[:, 0] = sample[0, 0]
             samples.append(sample)
 
-    pyX = np.array(samples)
+    pyX = np.array(samples, dtype=np.float32)
     print('pyX.npy: %s' % str(pyX.shape))
     print('mean = %.16f' % np.mean(pyX[:, :, 2:]))
     print('std  = %.16f' % np.std(pyX[:, :, 2:]))
