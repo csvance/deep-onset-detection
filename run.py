@@ -196,10 +196,11 @@ class OnsetModule(pl.LightningModule):
                  rho: float = RHO,
                  weight_decay: float = WEIGHT_DECAY,
                  d: int = D,
-                 se: int = SE):
+                 se: int = SE,
+                 seed: int = 0):
 
         super().__init__()
-        self.save_hyperparameters('d', 'epochs', 'lr', 'l2', 'rho', 'weight_decay', 'dropout', 'se')
+        self.save_hyperparameters('d', 'epochs', 'lr', 'l2', 'rho', 'weight_decay', 'dropout', 'se', 'seed')
 
         if Xy_train is not None:
             self.X_train, self.y_train = Xy_train
@@ -262,6 +263,7 @@ class OnsetModule(pl.LightningModule):
         self._l2 = l2
         self._weight_decay = weight_decay
         self._rho = rho
+        self._seed = seed
 
     def init(self):
         def _init(m):
@@ -490,7 +492,8 @@ def main(seed: int = 0):
                         lr=lr,
                         dropout=dropout,
                         se=se,
-                        rho=rho)
+                        rho=rho,
+                        seed=seed)
 
     model.init()
     logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=True)
