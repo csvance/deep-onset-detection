@@ -22,7 +22,7 @@ SE = 4
 BN_EPS = 0.001
 BN_MOM = 0.01
 
-EPOCHS = 2
+EPOCHS = 3
 BATCH_SIZE = 16
 MOMENTUM = 0.9
 LR = 0.01
@@ -272,7 +272,7 @@ class OnsetModule(pl.LightningModule):
         self.apply(_init)
 
     def forward(self, x: torch.tensor):
-        if True or self.training:
+        if self.training:
             mu = torch.mean(x)
             sd = torch.std(x)
         else:
