@@ -454,11 +454,14 @@ class OnsetModule(pl.LightningModule):
         return None
 
 
-@plac.annotations(seed=('Random seed', 'option', 'S', int),
-                  k=('k-folds', 'option', 'k', int))
+@plac.annotations(
+    seed=('Random seed', 'option', 'S', int),
+    k=('k-folds', 'option', 'k', int)
+)
 def main(seed: int = 0,
          k: int = 10):
     pyX = np.load('data/pyX.npy', mmap_mode='r')
+
     for ki in range(0, k):
         if k > 1:
             folds = np.array_split(np.unique(pyX[:, 0, 0]), k)
@@ -494,11 +497,14 @@ def main(seed: int = 0,
         logger = TensorBoardLogger('lightning_logs', name='%d_folds' % k, default_hp_metric=True)
         callbacks = []
         if k > 1:
-            callbacks.append(pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                          filename='fold_%d' % ki,
-                                                          monitor='val_auc',
-                                                          mode='max',
-                                                          verbose=True))
+            cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
+                                                         filename='fold_%d' % ki,
+                                                         monitor='val_auc',
+                                                         mode='max',
+                                                         verbose=True)
+            callbacks.append(cb_checkpoint)
+        else:
+            cb_checkpoint = None
 
         trainer = pl.Trainer(gpus=1,
                              precision=32,
@@ -509,9 +515,13 @@ def main(seed: int = 0,
                              deterministic=True,
                              val_check_interval=0.1,
                              logger=logger)
-
         trainer.fit(model)
-        if k == 1:
+
+        if cb_checkpoint is not None:
+            assert k != 1
+            logger.log_hyperparams(model.hparams, {'hp_metric': cb_checkpoint.best_model_score})
+        else:
+            assert k == 1
             results = trainer.test()
             logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
 
