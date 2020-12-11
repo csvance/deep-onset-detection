@@ -24,9 +24,9 @@ BN_MOM = 0.01
 
 EPOCHS = 2
 BATCH_SIZE = 16
-LR = 0.1
+LR = 0.05
 
-L2 = 0.000125
+L2 = 0.00025
 WEIGHT_DECAY = 0.
 RHO = 0.1
 DROPOUT = 0.5
@@ -142,7 +142,7 @@ class ResnetBlock(nn.Module):
                                bias=False)
 
         if se > 1:
-            self.se_pool = nn.AdaptiveMaxPool1d((1,))
+            self.se_pool = nn.AdaptiveAvgPool1d((1,))
             self.conv_squeeze = nn.Conv1d(c_in, int(c_in / se), kernel_size=1, bias=False)
             self.se_relu = nn.ReLU()
             self.conv_excite = nn.Conv1d(int(c_in / se), int(c_in), kernel_size=1, bias=False)
@@ -251,8 +251,8 @@ class OnsetModule(pl.LightningModule):
 
             c_in = cfg['dim']
 
-        self.norm_head1 = nn.BatchNorm1d(num_features=c_in, momentum=BN_MOM, eps=BN_EPS)
-        self.relu_head1 = nn.ReLU()
+        self.norm_head = nn.BatchNorm1d(num_features=c_in, momentum=BN_MOM, eps=BN_EPS)
+        self.relu_head = nn.ReLU()
         self.pool_head = nn.AdaptiveMaxPool1d((1,))
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(c_in, 2, bias=True)
@@ -289,8 +289,8 @@ class OnsetModule(pl.LightningModule):
         for idx, block in enumerate(self.blocks):
             x = block(x)
 
-        x = self.norm_head1(x)
-        x = self.relu_head1(x)
+        x = self.norm_head(x)
+        x = self.relu_head(x)
         x = self.pool_head(x)[:, :, 0]
         x = self.dropout(x)
         y = self.fc(x)
@@ -490,7 +490,7 @@ def main(seed: int = 0):
                         se=se)
 
     model.init()
-    logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=False)
+    logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=True)
     cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
                                                  filename='seed_%d' % seed,
                                                  monitor='val_auc',
@@ -504,7 +504,7 @@ def main(seed: int = 0):
                          flush_logs_every_n_steps=5,
                          callbacks=[cb_checkpoint],
                          deterministic=True,
-                         val_check_interval=0.25,
+                         val_check_interval=0.1,
                          logger=logger)
 
     trainer.fit(model)
