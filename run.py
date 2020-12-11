@@ -10,7 +10,7 @@ from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import OneCycleLR, StepLR
+from torch.optim.lr_scheduler import OneCycleLR
 from sam import SAM
 
 PLOT = False
@@ -22,13 +22,14 @@ SE = 4
 BN_EPS = 0.001
 BN_MOM = 0.01
 
-EPOCHS = 3
+EPOCHS = 2
 BATCH_SIZE = 16
-MOMENTUM = 0.9
-LR = 0.01
+LR = 0.1
 
-L2 = 0.
-DROPOUT = 0.
+L2 = 0.000125
+WEIGHT_DECAY = 0.
+RHO = 0.1
+DROPOUT = 0.5
 
 
 class OnsetDataset(Dataset):
@@ -192,11 +193,13 @@ class OnsetModule(pl.LightningModule):
                  lr: float = LR,
                  dropout: float = DROPOUT,
                  l2: float = L2,
+                 rho: float = RHO,
+                 weight_decay: float = WEIGHT_DECAY,
                  d: int = D,
                  se: int = SE):
 
         super().__init__()
-        self.save_hyperparameters('d', 'epochs', 'lr', 'l2', 'dropout', 'se')
+        self.save_hyperparameters('d', 'epochs', 'lr', 'l2', 'rho', 'weight_decay', 'dropout', 'se')
 
         if Xy_train is not None:
             self.X_train, self.y_train = Xy_train
@@ -257,6 +260,8 @@ class OnsetModule(pl.LightningModule):
         self._lr = lr
         self._epochs = epochs
         self._l2 = l2
+        self._weight_decay = weight_decay
+        self._rho = rho
 
     def init(self):
         def _init(m):
@@ -422,20 +427,9 @@ class OnsetModule(pl.LightningModule):
 
     def configure_optimizers(self):
 
-
-
-        """
-        inner_optimizer = torch.optim.SGD(self.parameters(),
-                                  lr=self._lr,
-                                  momentum=MOMENTUM)
-        optimizer = Lookahead(inner_optimizer)
-        """
-        optimizer = SAM(self.parameters(), base_optimizer=torch.optim.SGD, rho=0.1,
-                        lr=self._lr, momentum=MOMENTUM, weight_decay=0.0001)
+        optimizer = SAM(self.parameters(), base_optimizer=torch.optim.SGD, rho=self._rho,
+                        lr=self._lr, weight_decay=self._weight_decay)
         inner_optimizer = optimizer.base_optimizer
-        schedule = StepLR(inner_optimizer, 15, gamma=0.5)
-
-        """
         schedule = {'scheduler': OneCycleLR(inner_optimizer,
                                             max_lr=self._lr,
                                             epochs=self._epochs,
@@ -446,7 +440,7 @@ class OnsetModule(pl.LightningModule):
                     'interval': 'step',
                     'frequency': 1
                     }
-        """
+
         return [optimizer], [schedule]
 
     def train_dataloader(self):
