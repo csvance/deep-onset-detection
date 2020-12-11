@@ -8,6 +8,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
+import scikitplot as skplt
+
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
@@ -33,9 +35,10 @@ DROPOUT = 0.5
 
 
 class OnsetDataset(Dataset):
-    def __init__(self, X, y):
+    def __init__(self, X, y, training: bool = False):
         self.X = X
         self.y = y.astype(np.int64)
+        self.training = training
 
         if len(self.y.shape) == 2:
             self.w = compute_class_weight(y=np.max(self.y, axis=-1),
@@ -60,17 +63,20 @@ class OnsetDataset(Dataset):
             y = 1 if y_pos else 0
             w = self.w[y]
 
-            # Discount loss if either label is over 90% of the sequence
-            if y:
-                pct_pos = y_pos / (y_pos + y_neg)
-                pct_neg = y_neg / (y_pos + y_neg)
+            if self.training:
+                # Discount loss if either label is over 90% of the sequence
+                if y:
+                    pct_pos = y_pos / (y_pos + y_neg)
+                    pct_neg = y_neg / (y_pos + y_neg)
 
-                pct = min(pct_pos, pct_neg)
-                if pct < 0.1:
-                    w *= 10 * pct
-                # Make up for discount
-                w *= 1.1
+                    pct = min(pct_pos, pct_neg)
+                    if pct < 0.1:
+                        w *= 10 * pct
+                    # Make up for discount
+                    w *= 1.1
         else:
+            assert not self.training
+
             # When testing we only have a sequence wide label
             y = self.y[item]
             w = self.w[y]
@@ -283,8 +289,8 @@ class OnsetModule(pl.LightningModule):
             mu = torch.mean(x)
             sd = torch.std(x)
         else:
-            mu = 19.2833522369622834
-            sd = 530.5211141225101983
+            mu = 19.9470197464008088
+            sd = 528.4862623336450724
         x = (x - mu) / sd
 
         x = self.conv_stem(x)
@@ -310,9 +316,9 @@ class OnsetModule(pl.LightningModule):
                 for p in self.parameters():
                     if p.requires_grad:
                         if l2 is None:
-                            l2 = self._l2*torch.sum(torch.square(p))
+                            l2 = self._l2 * torch.sum(torch.square(p))
                         else:
-                            l2 += self._l2*torch.sum(torch.square(p))
+                            l2 += self._l2 * torch.sum(torch.square(p))
                 step_loss = step_loss + l2
             step_loss.backward()
             return step_loss
@@ -330,17 +336,17 @@ class OnsetModule(pl.LightningModule):
         return {'loss': loss}
 
     def optimizer_step(
-        self,
-        *args,
-        epoch: int = None,
-        batch_idx: int = None,
-        optimizer = None,
-        optimizer_idx: int = None,
-        optimizer_closure = None,
-        on_tpu: bool = None,
-        using_native_amp: bool = None,
-        using_lbfgs: bool = None,
-        **kwargs,
+            self,
+            *args,
+            epoch: int = None,
+            batch_idx: int = None,
+            optimizer=None,
+            optimizer_idx: int = None,
+            optimizer_closure=None,
+            on_tpu: bool = None,
+            using_native_amp: bool = None,
+            using_lbfgs: bool = None,
+            **kwargs,
     ) -> None:
         optimizer_closure()
 
@@ -368,13 +374,10 @@ class OnsetModule(pl.LightningModule):
 
         try:
             self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
-
             if PLOT:
-                cm = confusion_matrix(y_true=self._test_true.astype(np.int),
-                                      y_pred=np.round(self._test_pred).astype(np.int),
-                                      normalize='true')
-                ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
-                ax.set_title('Confusion Matrix - Epoch %d' % self.current_epoch)
+                skplt.metrics.plot_roc_curve(self._test_true,
+                                             np.array([1 - self._test_pred, self._test_pred]).transpose((1, 0)),
+                                             curves=(1,))
                 plt.show()
 
         except ValueError:
@@ -410,13 +413,10 @@ class OnsetModule(pl.LightningModule):
 
         try:
             self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
-
             if PLOT:
-                cm = confusion_matrix(y_true=self._test_true.astype(np.int),
-                                      y_pred=np.round(self._test_pred).astype(np.int),
-                                      normalize='true')
-                ax = sns.heatmap(cm, annot=True, fmt='.2%', cmap='Blues', vmin=0, vmax=1.)
-                ax.set_title('Confusion Matrix - Test')
+                skplt.metrics.plot_roc_curve(self._test_true,
+                                             np.array([1 - self._test_pred, self._test_pred]).transpose((1, 0)),
+                                             curves=(1,))
                 plt.show()
         except ValueError:
             pass
@@ -447,20 +447,20 @@ class OnsetModule(pl.LightningModule):
         return [optimizer], [schedule]
 
     def train_dataloader(self):
-        return DataLoader(OnsetDataset(self.X_train, self.y_train),
+        return DataLoader(OnsetDataset(self.X_train, self.y_train, training=True),
                           shuffle=True,
                           drop_last=True,
                           batch_size=BATCH_SIZE)
 
     def val_dataloader(self):
         if self.X_valid is not None:
-            return DataLoader(OnsetDataset(self.X_valid, self.y_valid),
+            return DataLoader(OnsetDataset(self.X_valid, self.y_valid, training=False),
                               batch_size=BATCH_SIZE)
         return None
 
     def test_dataloader(self):
         if self.X_test is not None:
-            return DataLoader(OnsetDataset(self.X_test, self.y_test),
+            return DataLoader(OnsetDataset(self.X_test, self.y_test, training=False),
                               batch_size=BATCH_SIZE)
         return None
 
@@ -469,79 +469,62 @@ class OnsetModule(pl.LightningModule):
                   k=('k-folds', 'option', 'k', int))
 def main(seed: int = 0,
          k: int = 10):
-
     pyX = np.load('data/pyX.npy', mmap_mode='r')
-    X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
-    y_test = np.load('data/test_labels.p', mmap_mode='r')
-
-    folds = np.array_split(np.unique(pyX[:, 0, 0]), k)
     for ki in range(0, k):
-        pl.seed_everything(seed)
+        if k > 1:
+            folds = np.array_split(np.unique(pyX[:, 0, 0]), k)
+            pl.seed_everything(seed)
 
-        pids_train = []
-        for n in range(ki, ki+k-1):
-            n = n % k
-            pids_train.extend(folds[n])
-        pids_valid = []
-        for n in range(ki+k-1, ki+k):
-            n = n % k
-            pids_valid.extend(folds[n])
+            pids_train = []
+            for n in range(ki, ki + k - 1):
+                n = n % k
+                pids_train.extend(folds[n])
+            pids_valid = []
+            for n in range(ki + k - 1, ki + k):
+                n = n % k
+                pids_valid.extend(folds[n])
 
-        idx_train = np.isin(pyX[:, 0, 0], pids_train)
-        idx_valid = np.isin(pyX[:, 0, 0], pids_valid)
+            idx_train = np.isin(pyX[:, 0, 0], pids_train)
+            idx_valid = np.isin(pyX[:, 0, 0], pids_valid)
 
-        X_train = pyX[idx_train, :, 2:]
-        y_train = pyX[idx_train, :, 1]
+            Xy_train = (pyX[idx_train, :, 2:], pyX[idx_train, :, 1])
+            Xy_valid = (pyX[idx_valid, :, 2:], pyX[idx_valid, :, 1])
+            Xy_test = None
+        else:
+            Xy_train = (pyX[:, :, 2:], pyX[:, :, 1])
+            Xy_valid = None
+            Xy_test = (np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2),
+                       np.load('data/test_labels.p', mmap_mode='r'))
 
-        X_valid = pyX[idx_valid, :, 2:]
-        y_valid = pyX[idx_valid, :, 1]
-
-        d = D
-        dropout = DROPOUT
-        lr = LR
-        se = SE
-        epochs = EPOCHS
-        rho = RHO
-
-        model = OnsetModule((X_train, y_train),
-                            (X_valid, y_valid),
-                            (X_test, y_test),
-                            d=d,
-                            epochs=epochs,
-                            lr=lr,
-                            dropout=dropout,
-                            se=se,
-                            rho=rho,
+        model = OnsetModule(Xy_train,
+                            Xy_valid,
+                            Xy_test,
                             seed=seed)
         model.init()
 
         logger = TensorBoardLogger('lightning_logs', name='%d_folds' % k, default_hp_metric=True)
-        cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                     filename='fold_%d' % ki,
-                                                     monitor='val_auc',
-                                                     mode='max',
-                                                     verbose=True)
+        callbacks = []
+        if k > 1:
+            callbacks.append(pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
+                                                          filename='fold_%d' % ki,
+                                                          monitor='val_auc',
+                                                          mode='max',
+                                                          verbose=True))
 
         trainer = pl.Trainer(gpus=1,
                              precision=32,
-                             max_epochs=epochs,
+                             max_epochs=EPOCHS,
                              log_every_n_steps=5,
                              flush_logs_every_n_steps=5,
-                             callbacks=[cb_checkpoint],
+                             callbacks=callbacks,
                              deterministic=True,
                              val_check_interval=0.1,
                              logger=logger)
 
         trainer.fit(model)
-        results = trainer.test(ckpt_path=cb_checkpoint.best_model_path)
-        logger.log_hyperparams(model.hparams, {'val_auc': cb_checkpoint.best_model_score,
-                                               'test_auc': results[0]['test_auc']})
-
-
-
-
-
-
+        if k == 1:
+            results = trainer.test()
+            logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
 
 
 if __name__ == '__main__':

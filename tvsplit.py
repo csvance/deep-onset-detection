@@ -15,9 +15,6 @@ EP_SAMPLES = 36001
 # Length of onset
 ONSET = HZ * 10
 
-# Onset Stride Size
-STRIDE = 5
-
 # Number of samples to create per episode
 SAMPLES_PER_EPISODE = 1000
 
@@ -27,7 +24,7 @@ SAMPLES_PER_EPISODE = 1000
     seqlen=('Length of the sequence to generate', 'option', 'l', int)
 )
 def main(csv_path: str = 'data/train_full_seq.csv',
-         seqlen: int = HZ*5):
+         seqlen: int = int(HZ*10)):
 
     random.seed(0)
     np.random.seed(0)
@@ -55,10 +52,10 @@ def main(csv_path: str = 'data/train_full_seq.csv',
 
         for n in range(0, SAMPLES_PER_EPISODE):
 
-            start = np.random.randint(0, len(episode) - seqlen)
+            start = np.random.randint(0, len(episode) - int(seqlen)/2)
             sample = episode[start:start+seqlen]
             if len(sample) < seqlen:
-                pad = seqlen - sample
+                pad = seqlen - len(sample)
                 sample = np.pad(sample, ((0, pad), (0, 0)))
             samples.append(sample)
 
