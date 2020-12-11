@@ -10,8 +10,8 @@ from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
-from torch_optimizer import Lookahead
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, StepLR
+from sam import SAM
 
 PLOT = False
 HISTO = True
@@ -27,8 +27,8 @@ BATCH_SIZE = 16
 MOMENTUM = 0.9
 LR = 0.01
 
-WEIGHT_DECAY = 0.001
-DROPOUT = 0.2
+L2 = 0.
+DROPOUT = 0.
 
 
 class OnsetDataset(Dataset):
@@ -167,7 +167,7 @@ class ResnetBlock(nn.Module):
         x = self.conv1(x)
         x = self.norm2(x)
         x = self.relu2(x)
-        if self.se:
+        if self.se > 1:
             x_se = self.se_pool(x)
             x_se = self.conv_squeeze(x_se)
             x_se = self.se_relu(x_se)
@@ -191,12 +191,12 @@ class OnsetModule(pl.LightningModule):
                  epochs: int = EPOCHS,
                  lr: float = LR,
                  dropout: float = DROPOUT,
-                 weight_decay: float = WEIGHT_DECAY,
+                 l2: float = L2,
                  d: int = D,
                  se: int = SE):
 
         super().__init__()
-        self.save_hyperparameters('d', 'epochs', 'lr', 'weight_decay', 'dropout', 'se')
+        self.save_hyperparameters('d', 'epochs', 'lr', 'l2', 'dropout', 'se')
 
         if Xy_train is not None:
             self.X_train, self.y_train = Xy_train
@@ -219,8 +219,9 @@ class OnsetModule(pl.LightningModule):
         self.blocks = nn.ModuleList()
 
         blocks = [
-            {'repeat': 2, 'dim': int(1 * d), 'stride': 2, 'project': False, 'se': se},
-            {'repeat': 3, 'dim': int(2 * d), 'stride': 2, 'project': True, 'se': se},
+            {'repeat': 1, 'dim': int(1 * d), 'stride': 2, 'project': False, 'se': se},
+            {'repeat': 1, 'dim': int(1 * d), 'stride': 2, 'project': False, 'se': se},
+            {'repeat': 2, 'dim': int(2 * d), 'stride': 2, 'project': True, 'se': se},
             {'repeat': 1, 'dim': int(4 * d), 'stride': 2, 'project': True, 'se': se},
         ]
 
@@ -253,43 +254,33 @@ class OnsetModule(pl.LightningModule):
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(c_in, 2, bias=True)
 
-        self._weight_decay = weight_decay
         self._lr = lr
         self._epochs = epochs
+        self._l2 = l2
 
     def init(self):
         def _init(m):
             if isinstance(m, nn.Linear):
-                torch.nn.init.kaiming_normal_(m.weight)
+                torch.nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv1d):
-                torch.nn.init.kaiming_normal_(m.weight)
+                torch.nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
 
         self.apply(_init)
 
     def forward(self, x: torch.tensor):
-
-        # Standardize input preserving relationship between channels
-        mu = torch.mean(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
-        sd = torch.std(x, dim=(1, 2)).unsqueeze(dim=-1).unsqueeze(dim=-1)
-        if self.training:
-            # Add random noise to normalization statistics
-            mu_r = torch.rand(1, device=x.device) + 1.
-            if np.random.random() <= 0.5:
-                mu_r = 1. / mu_r
-            mu *= mu_r
-
-            sd_r = torch.rand(1, device=x.device) + 1.
-            if np.random.random() <= 0.5:
-                sd_r = 1. / sd_r
-            sd *= sd_r
-
+        if True or self.training:
+            mu = torch.mean(x)
+            sd = torch.std(x)
+        else:
+            mu = 27.7861055245733155
+            sd = 483.8070229306061947
         x = (x - mu) / sd
-        x = self.conv_stem(x)
 
+        x = self.conv_stem(x)
         for idx, block in enumerate(self.blocks):
             x = block(x)
 
@@ -304,14 +295,50 @@ class OnsetModule(pl.LightningModule):
     def training_step(self, batch, batch_nb):
         X, y_target, w = batch
 
-        y = self.forward(X)
-        loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
+        def _step():
+            y = self.forward(X)
+            loss = torch.mean(w * torch.unsqueeze(F.cross_entropy(y, y_target, reduction="none"), dim=-1))
+            if self._l2 > 0.:
+                l2 = None
+                for p in self.parameters():
+                    if p.requires_grad:
+                        if l2 is None:
+                            l2 = self._l2*torch.sum(torch.square(p))
+                        else:
+                            l2 += self._l2*torch.sum(torch.square(p))
+                loss = loss + l2
+            loss.backward()
+            return loss
 
-        self.log('train_loss', loss, prog_bar=False, logger=True)
+        sam = self.optimizers()
+        loss_metric = _step()
+        sam.first_step(zero_grad=True)
+        _step()
+        sam.second_step(zero_grad=True)
+
+        self.log('train_loss', loss_metric, prog_bar=False, logger=True)
         self.log('lr', self.optimizers().param_groups[0]['lr'])
         self.log('momentum', self.optimizers().param_groups[0]['momentum'])
 
-        return {'loss': loss}
+        return {'loss': loss_metric}
+
+    def optimizer_step(
+        self,
+        *args,
+        epoch: int = None,
+        batch_idx: int = None,
+        optimizer = None,
+        optimizer_idx: int = None,
+        optimizer_closure = None,
+        on_tpu: bool = None,
+        using_native_amp: bool = None,
+        using_lbfgs: bool = None,
+        **kwargs,
+    ) -> None:
+        optimizer_closure()
+
+    def backward(self, loss, optimizer, optimizer_idx: int, *args, **kwargs) -> None:
+        pass
 
     def validation_step(self, batch, batch_nb):
         X, y_target, w = batch
@@ -394,11 +421,21 @@ class OnsetModule(pl.LightningModule):
         self._test_pred = []
 
     def configure_optimizers(self):
+
+
+
+        """
         inner_optimizer = torch.optim.SGD(self.parameters(),
-                                          lr=self._lr,
-                                          momentum=0.9,
-                                          weight_decay=self._weight_decay)
+                                  lr=self._lr,
+                                  momentum=MOMENTUM)
         optimizer = Lookahead(inner_optimizer)
+        """
+        optimizer = SAM(self.parameters(), base_optimizer=torch.optim.SGD, rho=0.1,
+                        lr=self._lr, momentum=MOMENTUM, weight_decay=0.0001)
+        inner_optimizer = optimizer.base_optimizer
+        schedule = StepLR(inner_optimizer, 15, gamma=0.5)
+
+        """
         schedule = {'scheduler': OneCycleLR(inner_optimizer,
                                             max_lr=self._lr,
                                             epochs=self._epochs,
@@ -409,7 +446,7 @@ class OnsetModule(pl.LightningModule):
                     'interval': 'step',
                     'frequency': 1
                     }
-
+        """
         return [optimizer], [schedule]
 
     def train_dataloader(self):
@@ -427,11 +464,8 @@ class OnsetModule(pl.LightningModule):
                           batch_size=BATCH_SIZE)
 
 
-@plac.annotations(seed=('Random seed', 'option', 'S', int),
-                  random=('Perform random hyperparm search', 'option', 'R', int)
-                  )
-def main(seed: int = 0,
-         random: int = 1):
+@plac.annotations(seed=('Random seed', 'option', 'S', int))
+def main(seed: int = 0):
     Xy_train = np.load('data/train.npy', mmap_mode='r')
 
     X_train = Xy_train[:, :, 1:11]
@@ -445,63 +479,43 @@ def main(seed: int = 0,
     X_test = np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2)
     y_test = np.load('data/test_labels.p', mmap_mode='r')
 
-    for r in range(0, random):
-        if random > 1:
-            pl.seed_everything(r)
-            d = int(np.random.choice([16, 32, 64]))
-            epochs = int(np.random.choice([1, 2, 3]))
-            dropout = float(np.random.choice([0., 0.1, 0.2, 0.3, 0.4, 0.5]))
-            lr = float(np.random.choice([0.05, 0.025, 0.01, 0.0075, 0.005, 0.0025, 0.001]))
-            weight_decay = float(np.random.choice([0.0001, 0.0005, 0.001, 0.005]))
-            se = SE
-        else:
-            pl.seed_everything(seed)
-            d = D
-            dropout = DROPOUT
-            lr = LR
-            weight_decay = WEIGHT_DECAY
-            se = SE
-            epochs = EPOCHS
+    pl.seed_everything(seed)
+    d = D
+    dropout = DROPOUT
+    lr = LR
+    se = SE
+    epochs = EPOCHS
 
-        model = OnsetModule((X_train, y_train),
-                            (X_valid, y_valid),
-                            (X_test, y_test),
-                            d=d,
-                            epochs=epochs,
-                            lr=lr,
-                            weight_decay=weight_decay,
-                            dropout=dropout,
-                            se=se)
+    model = OnsetModule((X_train, y_train),
+                        (X_valid, y_valid),
+                        (X_test, y_test),
+                        d=d,
+                        epochs=epochs,
+                        lr=lr,
+                        dropout=dropout,
+                        se=se)
 
-        model.init()
-        if random > 1:
-            logger = TensorBoardLogger('lightning_logs', name='random')
-            cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                         filename='random_%d.ckpt' % r,
-                                                         monitor='val_auc',
-                                                         mode='max',
-                                                         verbose=True)
-        else:
-            logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed)
-            cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                         filename='seed_%d.ckpt' % seed,
-                                                         monitor='val_auc',
-                                                         mode='max',
-                                                         verbose=True)
+    model.init()
+    logger = TensorBoardLogger('lightning_logs', name='seed_%d' % seed, default_hp_metric=False)
+    cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
+                                                 filename='seed_%d' % seed,
+                                                 monitor='val_auc',
+                                                 mode='max',
+                                                 verbose=True)
 
-        trainer = pl.Trainer(gpus=1,
-                             precision=32,
-                             max_epochs=epochs,
-                             log_every_n_steps=5,
-                             flush_logs_every_n_steps=5,
-                             callbacks=[cb_checkpoint],
-                             deterministic=True,
-                             val_check_interval=0.1,
-                             logger=logger)
+    trainer = pl.Trainer(gpus=1,
+                         precision=32,
+                         max_epochs=epochs,
+                         log_every_n_steps=5,
+                         flush_logs_every_n_steps=5,
+                         callbacks=[cb_checkpoint],
+                         deterministic=True,
+                         val_check_interval=0.25,
+                         logger=logger)
 
-        trainer.fit(model)
-        results = trainer.test()
-        logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
+    trainer.fit(model)
+    results = trainer.test(ckpt_path=cb_checkpoint.best_model_path)
+    logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
 
 
 if __name__ == '__main__':
