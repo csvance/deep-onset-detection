@@ -54,10 +54,11 @@ class OnsetDataset(Dataset):
     def __getitem__(self, item):
 
         X = self.X[item]
+        y = self.y[item]
 
         if len(self.y.shape) == 2:
-            y_pos = len(np.where(self.y[item] == 1)[0])
-            y_neg = len(self.y[item]) - y_pos
+            y_pos = len(np.where(y == 1)[0])
+            y_neg = len(y) - y_pos
 
             y = 1 if y_pos else 0
             w = self.w[y]
@@ -214,7 +215,7 @@ class OnsetModule(pl.LightningModule):
         self.Xy_train = Xy_train
         self.Xy_valid = Xy_valid
         self.Xy_test = Xy_test
-        self.pid_test = pid_test.astype(np.int64)
+        self.pid_test = pid_test
 
         self._test_pred = []
         self._test_true = []
@@ -491,7 +492,7 @@ def main(test: str = None,
         trainer.test(model)
         return
 
-    pyX = np.load('data/pyX.npy', mmap_mode='r')
+    pyX = np.load('data/pyX.npy')
 
     auc = []
     for ki in range(0, k):
@@ -550,7 +551,7 @@ def main(test: str = None,
                              val_check_interval=0.1,
                              logger=logger)
         trainer.fit(model)
-        trainer.save_checkpoint('checkpoint/final.ckpt')
+        trainer.save_checkpoint('checkpoint/fold_%d_final.ckpt' % ki)
 
         if cb_checkpoint is not None:
             assert k != 1
