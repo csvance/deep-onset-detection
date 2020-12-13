@@ -23,11 +23,11 @@ SE = 4
 BN_EPS = 0.001
 BN_MOM = 0.01
 
-EPOCHS = 3
+EPOCHS = 4
 BATCH_SIZE = 16
 LR = 0.05
 
-L2 = 0.00025
+L2 = 0.000125
 WEIGHT_DECAY = 0.
 RHO = 0.1
 DROPOUT = 0.5
@@ -151,7 +151,7 @@ class ResnetBlock(nn.Module):
                                bias=False)
 
         if se > 1:
-            self.se_pool = nn.AdaptiveAvgPool1d((1,))
+            self.se_pool = nn.AdaptiveMaxPool1d((1,))
             self.conv_squeeze = nn.Conv1d(c_in, int(c_in / se), kernel_size=1, bias=False)
             self.se_relu = nn.ReLU()
             self.conv_excite = nn.Conv1d(int(c_in / se), int(c_in), kernel_size=1, bias=False)
@@ -197,7 +197,7 @@ class ResnetBlock(nn.Module):
 
 
 class OnsetModule(pl.LightningModule):
-    def __init__(self, Xy_train=None, Xy_valid=None, Xy_test=None,
+    def __init__(self, Xy_train=None, Xy_valid=None, Xy_test=None, pid_test=None,
                  epochs: int = EPOCHS,
                  lr: float = LR,
                  dropout: float = DROPOUT,
@@ -214,6 +214,7 @@ class OnsetModule(pl.LightningModule):
         self.Xy_train = Xy_train
         self.Xy_valid = Xy_valid
         self.Xy_test = Xy_test
+        self.pid_test = pid_test.astype(np.int64)
 
         self._test_pred = []
         self._test_true = []
@@ -263,6 +264,10 @@ class OnsetModule(pl.LightningModule):
         self._rho = rho
         self._seed = seed
 
+        self._mu_s = None
+        self._sd_s = None
+        self._pid_s = None
+
     def init(self):
         def _init(m):
             if isinstance(m, nn.Linear):
@@ -277,15 +282,6 @@ class OnsetModule(pl.LightningModule):
         self.apply(_init)
 
     def forward(self, x: torch.tensor):
-        if self.training:
-            mu = torch.mean(x)
-            sd = torch.std(x)
-        else:
-            mu = 19.9470197464008088
-            sd = 528.4862623336450724
-
-        x = (x - mu) / sd
-
         x = self.conv_stem(x)
         for idx, block in enumerate(self.blocks):
             x = block(x)
@@ -300,6 +296,11 @@ class OnsetModule(pl.LightningModule):
 
     def training_step(self, batch, batch_nb):
         X, y_target, w = batch
+
+        # global batch-wise z-scoring
+        mu = torch.mean(X)
+        sd = torch.std(X)
+        X = (X - mu) / sd
 
         def forward_loss_backward():
             y = self.forward(X)
@@ -348,6 +349,12 @@ class OnsetModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_nb):
         X, y_target, w = batch
+
+        # training mean / std z-scoring
+        mu = 19.9470197464008088
+        sd = 528.4862623336450724
+        X = (X - mu) / sd
+
         y = self(X)
 
         loss = torch.sum(w * nn.KLDivLoss(reduction='none')(F.log_softmax(y, dim=-1), y_target)) / y.size(0)
@@ -388,6 +395,12 @@ class OnsetModule(pl.LightningModule):
 
     def test_step(self, batch, batch_nb):
         X, y_target, w = batch
+
+        # training mean / std
+        mu = 19.9470197464008088
+        sd = 528.4862623336450724
+        X = (X - mu) / sd
+    
         y = self(X)
 
         loss = torch.sum(w * nn.KLDivLoss(reduction='none')(F.log_softmax(y, dim=-1), y_target)) / y.size(0)
@@ -470,7 +483,8 @@ def main(test: str = None,
     if test is not None:
         model = OnsetModule.load_from_checkpoint(test,
                                                  Xy_test=(np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2),
-                                                          np.load('data/test_labels.p', mmap_mode='r')))
+                                                          np.load('data/test_labels.p', mmap_mode='r')),
+                                                 pid_test=np.load('data/test_pids.p'))
         trainer = pl.Trainer(gpus=1,
                              precision=32,
                              deterministic=True)
@@ -545,7 +559,7 @@ def main(test: str = None,
         else:
             assert k == 1
             results = trainer.test(model)
-            logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc']})
+            logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc'].item()})
 
     if len(auc) > 0:
         print("%d-folds ROC-AUC: %f" % (k, np.mean(auc)))
