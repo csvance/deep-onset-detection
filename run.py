@@ -32,6 +32,9 @@ WEIGHT_DECAY = 0.
 RHO = 0.1
 DROPOUT = 0.5
 
+TRAINING_MU = 19.9470197464008088
+TRAINING_SD = 528.4862623336450724
+
 
 class OnsetDataset(Dataset):
     def __init__(self, X, y, training: bool = False):
@@ -217,6 +220,8 @@ class OnsetModule(pl.LightningModule):
         self.Xy_test = Xy_test
         self.pid_test = pid_test
 
+        self.last = {}
+
         self._test_pred = []
         self._test_true = []
 
@@ -352,8 +357,8 @@ class OnsetModule(pl.LightningModule):
         X, y_target, w = batch
 
         # training mean / std z-scoring
-        mu = 19.9470197464008088
-        sd = 528.4862623336450724
+        mu = TRAINING_MU
+        sd = TRAINING_SD
         X = (X - mu) / sd
 
         y = self(X)
@@ -375,8 +380,9 @@ class OnsetModule(pl.LightningModule):
         self._test_true = np.concatenate(self._test_true, axis=0)
 
         try:
-            self._test_pred = np.tanh(5.49306 * self._test_pred)
-            self.log('val_auc', roc_auc_score(self._test_true, self._test_pred))
+            auc = roc_auc_score(self._test_true, self._test_pred)
+            self.log('val_auc', auc)
+            self.last['val_auc'] = auc
             if PLOT:
                 skplt.metrics.plot_roc_curve(self._test_true,
                                              np.array([1 - self._test_pred, self._test_pred]).transpose((1, 0)),
@@ -398,10 +404,10 @@ class OnsetModule(pl.LightningModule):
         X, y_target, w = batch
 
         # training mean / std
-        mu = 19.9470197464008088
-        sd = 528.4862623336450724
+        mu = TRAINING_MU
+        sd = TRAINING_SD
         X = (X - mu) / sd
-    
+
         y = self(X)
 
         loss = torch.sum(w * nn.KLDivLoss(reduction='none')(F.log_softmax(y, dim=-1), y_target)) / y.size(0)
@@ -421,8 +427,6 @@ class OnsetModule(pl.LightningModule):
         self._test_true = np.concatenate(self._test_true, axis=0)
 
         try:
-            # Map 0.1 to 0.5
-            self._test_pred = np.tanh(5.49306 * self._test_pred)
             self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
             if PLOT:
                 skplt.metrics.plot_roc_curve(self._test_true,
@@ -472,105 +476,50 @@ class OnsetModule(pl.LightningModule):
                           batch_size=BATCH_SIZE) if self.Xy_test is not None else None
 
 
-class OnsetEnsemble(pl.LightningModule):
-    def __init__(self, nets, Xy_test):
-        super().__init__()
-        self.nets = nn.ModuleList(nets)
+class OnsetEnsemble(OnsetModule):
+    def __init__(self, models, Xy_test):
+        super().__init__(Xy_test=Xy_test)
+
+        self.models = nn.ModuleList(models)
         self.Xy_test = Xy_test
-
-        self._test_true = []
-        self._test_pred = []
-
-        self._test_true = []
-        self._test_pred = []
 
     def forward(self, X):
         y = None
-        n = float(len(self.nets))
-        for net in self.nets:
-            y = net.forward(X)/n if y is None else y + net.forward(X)/n
+        n = float(len(self.models))
+        for model in self.models:
+            y = model.forward(X) / n if y is None else y + model.forward(X) / n
         return y
-
-    def test_step(self, batch, batch_nb):
-        X, y_target, w = batch
-
-        # training mean / std
-        mu = 19.9470197464008088
-        sd = 528.4862623336450724
-        X = (X - mu) / sd
-
-        y = self(X)
-
-        loss = torch.sum(w * nn.KLDivLoss(reduction='none')(F.log_softmax(y, dim=-1), y_target)) / y.size(0)
-        self.log('test_loss', loss)
-
-        self._test_pred.append(F.softmax(y.detach(), dim=-1)[:, 1].cpu().numpy())
-        self._test_true.append(np.ceil(y_target[:, 1].detach().cpu().numpy()).astype(np.int64))
-
-        return {'test_loss': loss}
-
-    def test_epoch_end(self, outputs):
-        avg_loss = torch.stack([x['test_loss'] for x in outputs]).mean()
-
-        self.log('test_loss', avg_loss, prog_bar=False, logger=True)
-
-        self._test_pred = np.concatenate(self._test_pred, axis=0)
-        self._test_true = np.concatenate(self._test_true, axis=0)
-
-        try:
-            # Map 0.1 to 0.5
-            self._test_pred = np.tanh(5.49306 * self._test_pred)
-            self.log('test_auc', roc_auc_score(self._test_true, self._test_pred))
-            if PLOT:
-                skplt.metrics.plot_roc_curve(self._test_true,
-                                             np.array([1 - self._test_pred, self._test_pred]).transpose((1, 0)),
-                                             curves=(1,))
-                plt.show()
-        except ValueError:
-            pass
-
-        self._test_true = []
-        self._test_pred = []
-
-        self._test_true = []
-        self._test_pred = []
-
-    def test_dataloader(self):
-        return DataLoader(OnsetDataset(self.Xy_test[0], self.Xy_test[1], training=False),
-                          batch_size=BATCH_SIZE) if self.Xy_test is not None else None
 
 
 @plac.annotations(
-    test=('Run testing on a checkpoint', 'option', 'T', str),
-    ens=('Test against k-folds checkpoints', 'flag', 'E', bool),
+    checkpoint=('Checkpoint to load', 'option', 'C', str),
+    test=('Run test', 'flag', 'T', str),
+    ens=('Ensemble test flag', 'flag', 'E', bool),
     seed=('Random seed', 'option', 'S', int),
     k=('k-folds', 'option', 'k', int)
 )
-def main(test: str = None,
+def main(checkpoint: str = None,
+         test: bool = False,
          ens: bool = False,
          seed: int = 0,
          k: int = 10):
+    if test:
 
-    if test is not None:
-        model = OnsetModule.load_from_checkpoint(test,
-                                                 Xy_test=(np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2),
-                                                          np.load('data/test_labels.p', mmap_mode='r')),
-                                                 pid_test=np.load('data/test_pids.p'))
-    elif ens:
-        models = [OnsetModule.load_from_checkpoint('checkpoint/fold_%d_final.ckpt' % ki) for ki in range(0, k)]
-        model = OnsetEnsemble(models, Xy_test=(np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2),
-                                                          np.load('data/test_labels.p', mmap_mode='r')))
-    else:
-        model = None
+        Xy_test = (np.swapaxes(np.load('data/test_inps.p', mmap_mode='r'), 1, 2),
+                   np.load('data/test_labels.p', mmap_mode='r'))
+        if not ens:
+            model = OnsetModule.load_from_checkpoint(checkpoint, Xy_test=Xy_test)
+        else:
+            models = [OnsetModule.load_from_checkpoint('checkpoint/fold_%d_final.ckpt' % ki) for ki in range(0, k)]
+            model = OnsetEnsemble(models, Xy_test=Xy_test)
 
-    if test or ens:
         trainer = pl.Trainer(gpus=1,
                              precision=32,
                              deterministic=True)
         trainer.test(model)
         return
 
-    pyX = np.load('data/pyX.npy')
+    pyX = np.load('data/pyX.npy', mmap_mode='r')
 
     auc = []
     for ki in range(0, k):
@@ -608,37 +557,21 @@ def main(test: str = None,
         model.init()
 
         logger = TensorBoardLogger('lightning_logs', name='%d_folds' % k, default_hp_metric=True)
-        callbacks = []
-        if k > 1:
-            cb_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoint',
-                                                         filename='fold_%d' % ki,
-                                                         monitor='val_auc',
-                                                         mode='max',
-                                                         verbose=True)
-            callbacks.append(cb_checkpoint)
-        else:
-            cb_checkpoint = None
 
         trainer = pl.Trainer(gpus=1,
                              precision=32,
                              max_epochs=EPOCHS,
                              log_every_n_steps=5,
                              flush_logs_every_n_steps=5,
-                             callbacks=callbacks,
                              deterministic=True,
-                             val_check_interval=0.1,
                              logger=logger)
         trainer.fit(model)
         trainer.save_checkpoint('checkpoint/fold_%d_final.ckpt' % ki)
 
-        if cb_checkpoint is not None:
-            assert k != 1
-            logger.log_hyperparams(model.hparams, {'hp_metric': cb_checkpoint.best_model_score})
-            auc.append(cb_checkpoint.best_model_score)
-        else:
-            assert k == 1
-            results = trainer.test(model)
-            logger.log_hyperparams(model.hparams, {'hp_metric': results[0]['test_auc'].item()})
+        logger.log_hyperparams(model.hparams, {'hp_metric': model.last['val_auc']})
+        auc.append(model.last['val_auc'])
+
+    print("Mean ROC-AUC: %f" % np.mean(auc))
 
 
 if __name__ == '__main__':
